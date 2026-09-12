@@ -233,6 +233,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 // RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻。
 // 冷却中的账号也参与（签到就是为了解冻它们）；禁用的跳过。
 // 旅行已从签到剥离为独立排程（travel_hours），不再搭签到便车。
+// 末尾追加连登管家（streak.go）：可兑换档位自动兑换 + 抽奖次数自动抽完——
+// 连登兑换按天数解锁，挂在每日签到后即「到天数那天自动完成兑换→抽奖闭环」。
 func (s *Scheduler) RunCheckinNow() {
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
@@ -253,6 +255,7 @@ func (s *Scheduler) RunCheckinNow() {
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain)
 	}
+	s.RunStreakBonusNow()
 }
 
 // RunActivityNow 立即对池内所有可用账号执行一次对话活跃上报。
