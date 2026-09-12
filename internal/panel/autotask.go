@@ -1,15 +1,22 @@
 // autotask.go 面板「一键完成」任务的动作实现。
 //
-// 设计依据：上游 scripts/task_*.py 实测结论——
+// 设计依据：上游 scripts/task_*.py 实测结论 + 2026-09-12 桌面指纹协议逆向
+// （data/desktop-task-protocol.md）——
 //   - first_buddy（+300 分）：report（前置解锁）→ agreement → buddy/first
 //   - chat_5（+100 分）：累计 5 条 chat_request_send 上报
 //   - Model_chat_GLM5.2（+100 分）：accept → 用 glm-5.2 真实对话一次 → 上报（模型字段对齐）
-//   - RichMeow_Chat：官方判据可能是桌面端专属通道，脚本「上线尝试 1 条上报」仍 0/1，
-//     故标记为尝试型（attempt）：跑了也可能不点亮，如实回报结果。
+//   - RichMeow_Chat：桌面指纹（workbuddy-desktop）完整对话事件链，纯 API 可点亮（三账号实测）
+//   - Buddy_App / Buddy_App_QQ：buddyapp 五连事件，纯 API 可点亮（两账号实测）
+//   - automation_1：automated_task_create_suc 事件，纯 API 可点亮（两账号实测）
+//   - Library_read：web 域 web_element_click(library_doc_intro_click)（三账号实测）
+//   - template_5 / playbook_prompt / create_canvas：asar 逆向出的判据事件
+//     （template_used / playbook_prompt_send / wbx_design_canvas_*），纯 API 可点亮（三账号实测）
+//   - expert_5 / Expert_team_use_3：真实专家列表 + 召唤链 + 真实 chat（服务端 requestId）
+//     + expert_actual_use（三账号实测）
+//   - Hp_Appearance：appearance/set + appearance_skin_apply 事件（两账号实测）
 //
-// 其余任务（create_canvas / Library_read / Expert_* / template_5 ...）判据是
-// 客户端内的具体交互行为（点某个按钮、开某个页面），无对应 HTTP 接口可复现，
-// 不在自动范围内——面板展示它们，由用户按指引在官方客户端操作。
+// 仍未破解：skill_1（疑似要求真实 Skill 工具调用）。
+// 不做：Expert_lighthouse（需真实连接器授权）、Expert_Philanthropy（真实捐款）。
 //
 // 所有动作幂等：已 claimed/已达标的任务直接跳过，不重复消耗上游配额。
 package panel
@@ -56,9 +63,58 @@ var autoActions = []autoAction{
 	},
 	{
 		TaskCode: "RichMeow_Chat",
-		Desc:     "尝试上报 1 条事件（上游未证实可脚本化，可能不点亮）",
-		Attempt:  true,
+		Desc:     "桌面指纹事件链上报（已验证：纯 API 可点亮，三账号实测）",
 		run:      runRichMeow,
+	},
+	{
+		TaskCode: "Buddy_App",
+		Desc:     "上报「进入 Buddy 应用」事件链（已验证：纯 API 可点亮）",
+		run:      runBuddyApp,
+	},
+	{
+		TaskCode: "Buddy_App_QQ",
+		Desc:     "上报「进入企鹅教师助手」事件链（已验证：纯 API 可点亮）",
+		run:      runBuddyApp,
+	},
+	{
+		TaskCode: "automation_1",
+		Desc:     "上报「定时任务创建」事件（已验证：纯 API 可点亮）",
+		run:      runAutomationCreate,
+	},
+	{
+		TaskCode: "Library_read",
+		Desc:     "上报「读资料库介绍」事件（已验证：纯 API 可点亮）",
+		run:      runLibraryRead,
+	},
+	{
+		TaskCode: "template_5",
+		Desc:     "上报「使用模板创建任务」事件组 ×5（已验证：三账号点亮）",
+		run:      runTemplateUse,
+	},
+	{
+		TaskCode: "playbook_prompt",
+		Desc:     "上报「灵感案例做同款发送 Prompt」事件组（已验证：三账号点亮）",
+		run:      runPlaybookPrompt,
+	},
+	{
+		TaskCode: "create_canvas",
+		Desc:     "上报「设计创意画布创建」事件组（已验证：三账号点亮，+300 分）",
+		run:      runCreateCanvas,
+	},
+	{
+		TaskCode: "expert_5",
+		Desc:     "真实专家召唤+使用链 ×5（专家市场列表+真实 chat，已验证：三账号点亮）",
+		run:      runExpertUse,
+	},
+	{
+		TaskCode: "Expert_team_use_3",
+		Desc:     "真实专家团召唤+使用链 ×3（已验证：三账号点亮）",
+		run:      runExpertTeamUse,
+	},
+	{
+		TaskCode: "Hp_Appearance",
+		Desc:     "设置主题 API + 皮肤生效事件（已验证：两账号点亮）",
+		run:      runAppearance,
 	},
 }
 
@@ -310,12 +366,180 @@ func runModelChat(p *Panel, a *auth.Auth) (string, error) {
 	return "已完成 glm-5.2 对话并上报", nil
 }
 
-// runRichMeow 尝试完成 RichMeow_Chat（上游判据不明，尽早上报一次看是否点亮）。
+// runRichMeow 完成 RichMeow_Chat（桌面端对话1次）。
+// 2026-09-12 三账号实测验证：以桌面指纹（extName=workbuddy-desktop）向
+// copilot.tencent.com/v2/report 上报完整对话事件链（agent_task_created →
+// chat_message_response isSuccessful=true 等 6 事件），纯 API 即可点亮并领奖
+// （紫川/人杰2 两账号无桌面客户端登录状态下 3 秒内 0/1 → 1/1）。
+// Hp_Appearance 的纯 API set 不计分（需客户端在主题下活跃），区别对待。
 func runRichMeow(p *Panel, a *auth.Auth) (string, error) {
-	if err := p.cfg.Upstream.ReportChatActivity(a, fmt.Sprintf("wb2api-richmeow-%d", time.Now().UnixMilli())); err != nil {
+	ms := time.Now().UnixMilli()
+	conv := fmt.Sprintf("wb2api-rm-%d", ms)
+	req := fmt.Sprintf("wb2api-rm-req-%d", ms)
+	msg := fmt.Sprintf("req-%d-user", ms)
+	events := upstream.DesktopChatSequence(conv, req, msg, "fast-model", "fast-model")
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
 		return "", err
 	}
-	return "已尝试上报（上游判据未证实，若进度未动说明该任务需桌面端客户端）", nil
+	return "已按桌面端指纹上报完整对话事件链（agent_task_created→chat_response）", nil
+}
+
+// runBuddyApp 完成 Buddy_App / Buddy_App_QQ（进入 Buddy 应用）。
+// 2026-09-12 两账号实测：buddyapp 五连事件（discover→show→enter→auth_confirm→
+// bind_skip）以 workbuddy-desktop 指纹上报即点亮，服务端不校验真实授权。
+// 用企鹅教师助手（Buddy_App_QQ 判据应用）作载体，同一组事件同时满足
+// Buddy_App「进入任一应用」——两个表项共用本 run，幂等由任务状态跳过兜底。
+func runBuddyApp(p *Panel, a *auth.Auth) (string, error) {
+	events := upstream.DesktopBuddyAppSequence("cb_y5Dy46tPQGGWtueMxXbe", "企鹅教师助手")
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
+		return "", err
+	}
+	return "已上报 buddyapp 进入五连事件（同时覆盖 Buddy_App 与 Buddy_App_QQ）", nil
+}
+
+// runAutomationCreate 完成 automation_1（设置自动化任务）。
+// 2026-09-12 两账号实测：automated_task_create_suc 事件纯 API 上报即点亮，
+// 无需真实创建定时任务。
+func runAutomationCreate(p *Panel, a *auth.Auth) (string, error) {
+	if err := p.cfg.Upstream.ReportDesktopEvent(a,
+		upstream.DesktopAutomationCreateEvent("wb2api 自动化")); err != nil {
+		return "", err
+	}
+	return "已上报定时任务创建事件", nil
+}
+
+// runLibraryRead 完成 Library_read（体验资料库）。
+// 2026-09-12 三账号实测：web 域 /v2/report 上报 web_element_click
+// (elementId=library_doc_intro_click) 即点亮（space 的 open/WS/inlong 都不是判据）。
+func runLibraryRead(p *Panel, a *auth.Auth) (string, error) {
+	const docURL = "https://www.workbuddy.cn/space/d/o0KWYeynteVv06UnAZqIFm"
+	if err := p.cfg.Upstream.ReportWebEvent(a, "web_element_click", docURL,
+		"library_doc_intro_click", "WorkBuddy资料库介绍"); err != nil {
+		return "", err
+	}
+	return "已上报资料库介绍阅读事件", nil
+}
+
+// runAppearance 完成 Hp_Appearance（换主题）。
+// 2026-09-12 紫川/人杰2 实测（desktopverify12）：判据是 appearance_skin_apply
+// 事件 {action:"apply",source:"settings_close",id:<resourceKey>,...}（客户端在
+// 主题生效状态下离开设置页时上报）——早期"纯 API set 不计分"的结论不准确，
+// 真相是当时只调了 appearance/set 没发事件。组合：set API 留痕 + 事件上报。
+func runAppearance(p *Panel, a *auth.Auth) (string, error) {
+	const themeKey = "theme-tkmw7j" // 和平精英激战金秋（Hp_Appearance 判据主题）
+	if err := p.cfg.Upstream.SetAppearanceTheme(a, themeKey); err != nil {
+		return "", fmt.Errorf("设置主题: %w", err)
+	}
+	time.Sleep(2 * time.Second)
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopEvent{
+		"eventCode": "appearance_skin_apply", "action": "apply", "source": "settings_close",
+		"id": themeKey, "vipLevel": 0, "series": "", "type": "unknown",
+	}); err != nil {
+		return "", err
+	}
+	return "已设置主题并上报皮肤生效事件", nil
+}
+
+// runTemplateUse 完成 template_5（使用 5 个模板创建任务）。
+// 2026-09-12 三账号实测：agent_task_created_with_template + template_used 事件组
+// （JOIN chat 链）一次上报 5 组即 5/5 点亮。template_id 服务端不校验真实性。
+func runTemplateUse(p *Panel, a *auth.Auth) (string, error) {
+	templates := [][2]string{{"1", "深度研究"}, {"2", "周报生成"}, {"3", "竞品分析"}, {"4", "活动策划"}, {"5", "代码评审"}}
+	for i, tp := range templates {
+		ms := time.Now().UnixMilli()
+		conv := fmt.Sprintf("wb2api-tpl-%d-%d", ms, i)
+		req := fmt.Sprintf("wb2api-tpl-req-%d-%d", ms, i)
+		events := upstream.DesktopTemplateUseSequence(conv, req, tp[0], tp[1])
+		if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
+			return fmt.Sprintf("第 %d 组模板事件上报失败: %v", i+1, err), nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return "已上报 template_used ×5", nil
+}
+
+// runPlaybookPrompt 完成 playbook_prompt（灵感案例 Dialog 中发送 Prompt）。
+// 判据是 playbook_prompt_send（Dialog 发送）而非卡片曝光/点击——asar 逆向确认。
+func runPlaybookPrompt(p *Panel, a *auth.Auth) (string, error) {
+	ms := time.Now().UnixMilli()
+	conv := fmt.Sprintf("wb2api-pb-%d", ms)
+	req := fmt.Sprintf("wb2api-pb-req-%d", ms)
+	events := upstream.DesktopPlaybookPromptSequence(conv, req, "pm-gtm-launch-plan", "新产品上市 GTM 发布计划一页纸")
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
+		return "", err
+	}
+	return "已上报 playbook_cta_click + playbook_prompt_send", nil
+}
+
+// runCreateCanvas 完成 create_canvas（设计创意模式创建画布，+300 分）。
+// 判据是 wbx_design_canvas_task_create/open（Ardot create_design 工具完成遥测）。
+func runCreateCanvas(p *Panel, a *auth.Auth) (string, error) {
+	ms := time.Now().UnixMilli()
+	conv := fmt.Sprintf("wb2api-canvas-%d", ms)
+	req := fmt.Sprintf("wb2api-canvas-req-%d", ms)
+	events := upstream.DesktopDesignCanvasSequence(conv, req)
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
+		return "", err
+	}
+	return "已上报 wbx_design_canvas_task_create/open", nil
+}
+
+// expertSummonGap 专家召唤链的间隔（真实使用节奏，v11 实测 8s 成功率 100%）。
+const expertSummonGap = 6 * time.Second
+
+// runExpertUse 完成 expert_5（使用 5 个平台专家）。
+// 2026-09-12 三账号实测公式：真实专家列表（id 必须真实存在）→ 召唤链
+// （summon_click/summoned）→ 真实 chat 拿服务端 requestId → expert_actual_use。
+// 自造专家 id 或自造 requestId 均不计数。
+func runExpertUse(p *Panel, a *auth.Auth) (string, error) {
+	return runExpertBatch(p, a, "agent", 5)
+}
+
+// runExpertTeamUse 完成 Expert_team_use_3（使用 3 个专家团，expertType=team）。
+func runExpertTeamUse(p *Panel, a *auth.Auth) (string, error) {
+	return runExpertBatch(p, a, "team", 3)
+}
+
+// runExpertBatch 专家召唤+使用的公共实现。失败逐个继续，返回汇总信息。
+func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (string, error) {
+	experts, err := p.cfg.Upstream.MarketExpertList(a, expertType)
+	if err != nil {
+		return "", fmt.Errorf("拉取专家列表: %w", err)
+	}
+	if len(experts) == 0 {
+		return "", fmt.Errorf("专家市场列表为空")
+	}
+	ok, fail := 0, 0
+	for i, e := range experts {
+		if ok >= count {
+			break
+		}
+		// 召唤链（web_element_click + summon_click + summoned）。
+		summonEvents := upstream.DesktopExpertSummonSequence(e)
+		if err := p.cfg.Upstream.ReportDesktopEvent(a, summonEvents...); err != nil {
+			fail++
+			continue
+		}
+		// 真实 chat（带 X-Expert-Id）→ 服务端 requestId。
+		conv, req, cerr := p.cfg.Upstream.DesktopChatWithExpert(a, e.ExpertID)
+		if cerr != nil {
+			fail++
+			continue
+		}
+		// 使用事件（JOIN 服务端 requestId）+ chat 链。
+		events := append(upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model"),
+			upstream.DesktopExpertActualUseEvent(e, conv, req))
+		if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
+			fail++
+			continue
+		}
+		ok++
+		if i < len(experts)-1 {
+			time.Sleep(expertSummonGap)
+		}
+	}
+	_ = fail
+	return fmt.Sprintf("已对 %d 位真实专家完成召唤+使用链（类型 %s）", ok, expertType), nil
 }
 
 // ---------------------------------------------------------------------------

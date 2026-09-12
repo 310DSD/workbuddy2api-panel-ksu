@@ -431,7 +431,17 @@ const AUTO_TASKS = {
   'chat_5': '上报 5 条对话活跃事件（自动补足差额）',
   'first_buddy': '上报解锁 → 同意协议 → 领取第一只 Buddy',
   'Model_chat_GLM5.2': '接受任务 → glm-5.2 真实对话一次 → 对齐模型上报',
-  'RichMeow_Chat': '尝试上报（上游判据未证实，可能不点亮）'
+  'RichMeow_Chat': '桌面指纹事件链上报（已验证可点亮）',
+  'Buddy_App': '上报「进入 Buddy 应用」事件链（已验证可点亮）',
+  'Buddy_App_QQ': '上报「进入企鹅教师助手」事件链（已验证可点亮）',
+  'automation_1': '上报「定时任务创建」事件（已验证可点亮）',
+  'Library_read': '上报「读资料库介绍」事件（已验证可点亮）',
+  'template_5': '上报「使用模板创建任务」事件组 ×5（三账号实测点亮）',
+  'playbook_prompt': '上报「灵感案例做同款发送 Prompt」事件组（三账号实测点亮）',
+  'create_canvas': '上报「设计创意画布创建」事件组（三账号实测点亮，+300 分）',
+  'expert_5': '真实专家召唤+使用链 ×5（专家市场+真实 chat，三账号实测点亮）',
+  'Expert_team_use_3': '真实专家团召唤+使用链 ×3（三账号实测点亮）',
+  'Hp_Appearance': '设置主题 API + 皮肤生效事件（两账号实测点亮）'
 };
 
 function openTasks(uid) {
