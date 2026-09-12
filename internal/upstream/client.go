@@ -266,6 +266,9 @@ type Client struct {
 
 	ChatBaseCN    string
 	BillingBaseCN string
+	// WebBaseCN 官网（workbuddy.cn）域：部分「任务领奖」类接口只在此域提供
+	// （Web 成长中心用；CLI 域 copilot.tencent.com 的同名路径返回 400）。
+	WebBaseCN string
 }
 
 // New 生产默认值。配置连接池减少 TLS 握手。
@@ -283,6 +286,7 @@ func New() *Client {
 		SanitizeFingerprints: true,
 		ChatBaseCN:           "https://copilot.tencent.com",
 		BillingBaseCN:        "https://www.codebuddy.cn",
+		WebBaseCN:            "https://www.workbuddy.cn",
 	}
 }
 
@@ -319,6 +323,14 @@ func (c *Client) effortsSnapshot() map[string][]string {
 
 func (c *Client) billingBase(a *auth.Auth) string {
 	return c.BillingBaseCN
+}
+
+// webBase 返回官网域（任务领奖类接口；未注入时回落默认）。
+func (c *Client) webBase() string {
+	if c.WebBaseCN != "" {
+		return c.WebBaseCN
+	}
+	return "https://www.workbuddy.cn"
 }
 
 // billing 域端点路径（billingBase + path）。balance/checkin 与 report（report.go）同域，

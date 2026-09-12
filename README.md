@@ -60,7 +60,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | **Web 管理面板** | `internal/panel`，前端 go:embed 单文件进二进制，零外部依赖。账号池可视化（健康色条 / 积分量条 / 冷却倒计时）、单号运维、批量任务、日志查看、明暗主题 |
 | **浏览器内 OAuth 添加账号** | 面板「添加账号」按钮完成设备授权 → 凭证落盘 → **热加载进池（免重启）**，替代命令行 `login.sh` 流程 |
 | **在线配置编辑（热生效）** | 面板直接改 `config.json`：API 密钥 / `soft_rate` / 脱敏开关 / 池参数 / 任务排程**立即生效**；装配期字段（listen 等）保存后提示需重启。写入采用深合并 + 原子替换，保留未知键 |
-| **积分任务体系** | 任务列表 / 接受 / 领取接口 + 面板弹窗；「一键完成」对可自动化任务（`chat_5` / `first_buddy` / `Model_chat_GLM5.2`）直接推进进度并回读验证 |
+| **积分任务体系** | 任务列表 / 接受 / 领取接口 + 面板弹窗；「一键完成」对可自动化任务（`chat_5` / `first_buddy` / `Model_chat_GLM5.2`）直接推进进度、等待异步计分落定后**自动领奖** |
 | **首启自动生成配置** | 目录下无 `config.json` 时自动生成推荐配置（含 `crypto/rand` 随机 `api_key`），双击即开 |
 | **粘性会话内容回退** | 客户端不发 `conversation_id` 时，用 `system + 首条 user` 哈希派生会话键（`d-` 前缀），通用 OpenAI 客户端也能享受粘性 |
 | **余额后台刷新** | `schedule.balance_refresh_minutes`（默认 5）周期查余额并更新池，冷却账号余额恢复自动解冻 |
@@ -76,7 +76,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 | 状态 | 事项 | 说明 |
 |---|---|---|
-| ⚠️ 待上游 | **single 类任务奖励领取** | 任务进度可推进到 `completed`，但 `reward/claim` 接口返回 `400 task not completed`（实测 7 种端点 / 载荷变体均被拒）。`first_buddy` 等 `task_type:"auto"` 的任务奖励**自动发放**（无需领取）。面板保留「领取」按钮并如实透出上游错误 |
+| ✅ 已修复 | ~~single 类任务奖励领取~~ | **领奖已打通**：正确端点是 Web 域 `POST https://www.workbuddy.cn/activity/growth/tasks/<task_code>/claim`（任务码在路径、无 body、`x-client-platform: web`）。此前误用 CLI 域 `copilot.tencent.com/v2/.../reward/claim` 导致长期 400。「一键完成」现已**达标即自动领奖**（含异步计分等待），面板也可手动领取。实测 +100 分 +5 能到账、重复领取幂等 |
 | ⚠️ 部分 | **RichMeow_Chat 任务** | 判据疑似桌面端专属通道，行为事件上报后进度不动（上游脚本亦标注"未破"）。面板提供「一键完成」但标注为尝试型 |
 | ❌ 不支持 | **纯交互类任务**（`create_canvas` / `Library_read` / `Expert_*` / `template_5` 等 14 个） | 判据是官方客户端内的具体交互，无对应 HTTP 接口，无法自动化；面板展示任务指引与奖励，需在客户端操作 |
 | ❌ 未做 | **面板侧 Upstash / 凭证目录配置** | 涉及启动期装配，需手工编辑 `config.json`（面板会提示为重启项） |
@@ -401,7 +401,7 @@ http://127.0.0.1:7863/panel/
 |---|---|
 | **账号池** | 统计条（总数/可用/冷却/禁用/可用积分合计/粘性会话）+ 账号表：状态标签（可用/限流冷却/积分冷却/熔断/已禁用）、积分量条、成功失败计数、在途、单号操作（签到/余额/任务/解冻/禁用/移除）；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」 |
 | **添加账号**（顶部按钮） | 浏览器内完成 OAuth 设备授权（显示授权链接 + 自动轮询），登录后凭证落盘并**热加载进池，免重启** |
-| **积分任务**（账号行内「任务」按钮） | 展示全部任务（进度 / 奖励分数与能量 / 状态）；「全部接受」批量报名；「一键完成」对可自动化任务（`chat_5` / `first_buddy` / `Model_chat_GLM5.2`）直接推进进度并回读验证；纯交互类任务展示操作指引 |
+| **积分任务**（账号行内「任务」按钮） | 展示全部任务（进度 / 奖励分数与能量 / 状态）；「全部接受」批量报名；「一键完成」对可自动化任务直接推进进度并**自动领奖**（含异步计分等待与幂等处理）；纯交互类任务展示操作指引 |
 | **模型与档位** | 实时查询上游：每模型的积分倍率、默认思考档、支持的档位（含「off（可关）」）、上下文长度与最大输出 |
 | **配置** | 在线编辑 config.json：API 密钥、定时任务（四类任务时点与开关、余额刷新间隔）、账号池与流量治理参数、上游超时与 UA、提示词模式、脱敏/粘性开关 |
 | **运行日志** | 最近 500 行服务日志 + 请求表格日志（可开关自动滚动） |
@@ -474,8 +474,11 @@ http://127.0.0.1:7863/panel/
 | `activity/growth/buddy/travel/depart` | POST | 猫猫旅行：派出 |
 | `activity/growth/buddy/travel/claim` | POST | 猫猫旅行：领奖 |
 | `activity/growth/streak` | GET | 连登天数（只读 oracle，活跃自检用） |
+| `activity/growth/tasks` | GET | 任务列表（含 reward_credit/reward_energy/progress） |
+| `activity/growth/tasks/accept` | POST | 接受任务（`{"task_codes":[...]}`） |
+| `activity/growth/tasks/<task_code>/claim` | POST | **领取任务奖励**（任务码在路径、无 body；**Web 域 `www.workbuddy.cn`**，非 CLI 域——这是领奖能成功的关键） |
 
-出站请求统一携带 `CLI/2.63.2 CodeBuddy/2.63.2` UA（可被 `upstream.user_agent` 覆盖）；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**（该头只出现在 token 刷新请求）。
+出站请求统一携带 `CLI/2.63.2 CodeBuddy/2.63.2` UA（可被 `upstream.user_agent` 覆盖）；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**（该头只出现在 token 刷新请求）。领奖请求额外带 `x-client-platform: web` 与 workbuddy.cn 的 Origin/Referer。
 
 ## 请求级日志
 

@@ -17,6 +17,7 @@ package upstream
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
@@ -25,7 +26,6 @@ import (
 const (
 	tasksListPath   = "/v2/activity/growth/tasks"
 	tasksAcceptPath = "/v2/activity/growth/tasks/accept"
-	tasksClaimPath  = "/v2/activity/growth/tasks/reward/claim"
 )
 
 // Task 单个任务的对外视图（字段名与上游 JSON 对齐，多余字段不透出）。
@@ -33,10 +33,10 @@ type Task struct {
 	TaskCode     string `json:"task_code"`
 	Title        string `json:"title,omitempty"`
 	Description  string `json:"description,omitempty"` // 操作指引（含跳转说明）
-	TaskDesc     string `json:"task_desc,omitempty"`  // 达成条件简述
-	Credit       int64  `json:"credit,omitempty"`     // 奖励积分（上游 reward_credit）
-	Energy       int64  `json:"energy,omitempty"`     // 奖励能量（上游 reward_energy）
-	HasReward    bool   `json:"has_reward,omitempty"` // 是否带奖励
+	TaskDesc     string `json:"task_desc,omitempty"`   // 达成条件简述
+	Credit       int64  `json:"credit,omitempty"`      // 奖励积分（上游 reward_credit）
+	Energy       int64  `json:"energy,omitempty"`      // 奖励能量（上游 reward_energy）
+	HasReward    bool   `json:"has_reward,omitempty"`  // 是否带奖励
 	RewardBuddy  bool   `json:"reward_buddy,omitempty"`
 	TaskType     string `json:"task_type,omitempty"` // single（一次性）/ 累计型
 	Tag          string `json:"tag,omitempty"`       // 端标记（PC 等）
@@ -126,8 +126,60 @@ func (c *Client) AcceptTasks(a *auth.Auth, taskCodes []string) error {
 	return err
 }
 
-// ClaimReward 领取单个任务奖励。未达标时上游返回业务错误（调用方据 err 判断）。
-func (c *Client) ClaimReward(a *auth.Auth, taskCode string) error {
-	_, err := c.growthJSON(a, http.MethodPost, tasksClaimPath, map[string]any{"task_code": taskCode})
-	return err
+// ClaimReward 领取单个任务奖励。
+//
+// 端点来源（实测）：Web 成长中心的领奖请求 ——
+//
+//	POST https://www.workbuddy.cn/activity/growth/tasks/<task_code>/claim
+//	（任务码在**路径**里，无 body；带 x-client-platform: web 头，Bearer 鉴权）
+//
+// 关键区别：此前误用 CLI 域 copilot.tencent.com 的
+// /v2/activity/growth/tasks/reward/claim（task_code 放 body），该路径**不存在**，
+// 一直返回 400 "task not completed"，是此前领奖失败的真实原因。
+// 本实现返回 (credit, energy, err)：credit/energy 为本次到账奖励（已领取过时为 0）。
+func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int64, err error) {
+	req, err := http.NewRequest(http.MethodPost,
+		c.webBase()+"/activity/growth/tasks/"+url.PathEscape(taskCode)+"/claim", nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	// Web 端请求头形状（对照浏览器实际请求）：Origin/Referer 指向 workbuddy.cn 成长中心，
+	// 带 x-client-platform: web 标记来源端。
+	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://www.workbuddy.cn")
+	req.Header.Set("Referer", "https://www.workbuddy.cn/profile/growth-center")
+	req.Header.Set("x-client-platform", "web")
+	if ua := c.userAgent(); ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
+	if a.UID != "" {
+		req.Header.Set("X-User-Id", a.UID)
+	}
+	if a.EnterpriseID != "" {
+		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
+		req.Header.Set("X-Tenant-Id", a.EnterpriseID)
+	}
+	if a.Domain != "" {
+		req.Header.Set("X-Domain", a.Domain)
+	}
+
+	data, err := c.doJSON(req)
+	if err != nil {
+		return 0, 0, err
+	}
+	// 响应 data：{"already_claimed":bool,"credit":100,"energy":5,...}
+	var resp struct {
+		AlreadyClaimed bool  `json:"already_claimed"`
+		Credit         int64 `json:"credit"`
+		Energy         int64 `json:"energy"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, 0, err
+	}
+	if resp.AlreadyClaimed {
+		return 0, 0, nil // 幂等：重复领取不算错误，但无新增奖励
+	}
+	return resp.Credit, resp.Energy, nil
 }

@@ -130,10 +130,16 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "task_code required")
 		return
 	}
-	if err := p.cfg.Upstream.ClaimReward(a, body.TaskCode); err != nil {
+	credit, energy, err := p.cfg.Upstream.ClaimReward(a, body.TaskCode)
+	if err != nil {
 		writeErr(w, http.StatusBadGateway, "claim: "+err.Error())
 		return
 	}
-	log.Printf("panel: 领取任务奖励 uid=%s code=%s", uid, body.TaskCode)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	if credit == 0 && energy == 0 {
+		log.Printf("panel: 领取任务奖励 uid=%s code=%s（已领取过，无新增）", uid, body.TaskCode)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "already_claimed": true, "message": "该奖励此前已领取"})
+		return
+	}
+	log.Printf("panel: 领取任务奖励 uid=%s code=%s +%d分 +%d能", uid, body.TaskCode, credit, energy)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credit": credit, "energy": energy})
 }

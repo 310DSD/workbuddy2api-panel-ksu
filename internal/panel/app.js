@@ -550,9 +550,10 @@ $('taskBody').addEventListener('click', async ev => {
         const advanced = r.progress_before !== r.progress_after;
         let msg = r.message || '已执行';
         if (r.progress_after) msg += `（进度 ${r.progress_before} → ${r.progress_after}）`;
-        if (r.claimable) msg += '，现在可以领取奖励';
+        if (r.claimed) msg += '，奖励已自动到账';
+        else if (r.claimable) msg += r.claim_error ? '，可点「领取」重试' : '';
         else if (r.attempt && !advanced) msg += '；进度未动，该任务可能需要官方客户端';
-        toast(msg, r.claimable || advanced ? 'ok' : 'err');
+        toast(msg, (r.claimed || advanced) ? 'ok' : 'err');
       }
       loadOverview(true);
     } else {

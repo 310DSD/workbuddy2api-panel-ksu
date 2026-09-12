@@ -86,6 +86,41 @@ func (p *Panel) taskByCode(a *auth.Auth, code string) (*upstream.Task, error) {
 	return nil, nil
 }
 
+// claimPollAttempts / claimPollGap 达标回读的有界轮询参数。
+// 背景：上游计分是**异步**的——行为事件上报后进度要数秒才刷新（实测 Model_chat
+// 对话完成后立即回读仍是 0/1，约 5-8 秒后才变 1/1）。一次性回读会误判"未达标"，
+// 从而跳过自动领奖。这里最多轮询 N 次、每次间隔 gap，总预算约 12 秒。
+var (
+	claimPollAttempts = 4
+	claimPollGap      = 3 * time.Second
+)
+
+// taskByCodeWaiting 回读任务，若未达标则在有界预算内轮询等待（上游异步计分）。
+// 已达标（claimable）立即返回；预算耗尽返回最后一次结果（可能仍未达标）。
+func (p *Panel) taskByCodeWaiting(a *auth.Auth, code string) (*upstream.Task, error) {
+	t, err := p.taskByCode(a, code)
+	if err != nil || t == nil {
+		return t, err
+	}
+	if t.Claimable || t.Claimed {
+		return t, nil
+	}
+	for i := 1; i < claimPollAttempts; i++ {
+		time.Sleep(claimPollGap)
+		t2, err2 := p.taskByCode(a, code)
+		if err2 != nil {
+			return t, nil // 轮询期间的查询失败不覆盖已拿到的结果
+		}
+		if t2 != nil {
+			t = t2
+			if t.Claimable || t.Claimed {
+				return t, nil
+			}
+		}
+	}
+	return t, nil
+}
+
 // accountTaskAuto 一键完成单个任务：执行对应动作 → 回读进度 → 汇报结果。
 func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
@@ -125,17 +160,16 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "执行失败: "+err.Error())
 		return
 	}
-	// 回读验证：上报 200 ≠ 计分（上游可能静默丢弃），必须用结果说话。
-	after, aerr := p.taskByCode(a, act.TaskCode)
+	// 回读验证：上报 200 ≠ 计分（上游可能静默丢弃 + 计分异步），
+	// 用有界轮询等异步计时落定，再决定是否自动领奖。
+	after, aerr := p.taskByCodeWaiting(a, act.TaskCode)
 	progressBefore, progressAfter := taskProgressText(before), ""
 	claimable := false
 	if aerr == nil && after != nil {
 		progressAfter = taskProgressText(after)
 		claimable = after.Claimable
 	}
-	log.Printf("panel: 任务动作 uid=%s code=%s progress %s -> %s claimable=%v",
-		uid, act.TaskCode, progressBefore, progressAfter, claimable)
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"ok":               true,
 		"message":          msg,
 		"progress_before":  progressBefore,
@@ -143,7 +177,26 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		"claimable":        claimable,
 		"attempt":          act.Attempt,
 		"verify_supported": true,
-	})
+	}
+	// 达标即自动领奖（Web 端 claim）：把"完成→领奖"收敛成一步，无需用户再点一次。
+	if claimable {
+		if credit, energy, cerr := p.cfg.Upstream.ClaimReward(a, act.TaskCode); cerr == nil {
+			resp["claimed"] = true
+			resp["credit"] = credit
+			resp["energy"] = energy
+			if credit > 0 || energy > 0 {
+				resp["message"] = msg + fmt.Sprintf("；已自动领奖 +%d 分 +%d 能", credit, energy)
+			} else {
+				resp["message"] = msg + "；奖励此前已领取"
+			}
+		} else {
+			resp["claim_error"] = cerr.Error()
+			resp["message"] = msg + "；达标但领奖失败，可在任务列表手动点「领取」重试"
+		}
+	}
+	log.Printf("panel: 任务动作 uid=%s code=%s progress %s -> %s claimable=%v claimed=%v",
+		uid, act.TaskCode, progressBefore, progressAfter, claimable, resp["claimed"])
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // taskProgressText 任务进度的可读表示（回读对比用）。
@@ -329,12 +382,27 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			out = append(out, item)
 			continue
 		}
-		after, _ := p.taskByCode(a, act.TaskCode)
+		after, _ := p.taskByCodeWaiting(a, act.TaskCode)
 		item["status"] = "done"
 		item["message"] = msg
 		item["progress_after"] = taskProgressText(after)
+		// 进度达标即自动领奖（Web 端 claim 接口，见 upstream.ClaimReward）。
+		// 领奖失败不掩盖主流程结果：status 仍为 done，附加 claim_error 供前端提示。
 		if after != nil && after.Claimable {
 			item["claimable"] = true
+			if credit, energy, cerr := p.cfg.Upstream.ClaimReward(a, act.TaskCode); cerr == nil {
+				item["claimed"] = true
+				item["credit"] = credit
+				item["energy"] = energy
+				if credit > 0 || energy > 0 {
+					item["message"] = msg + fmt.Sprintf("；已自动领奖 +%d 分 +%d 能", credit, energy)
+				} else {
+					item["message"] = msg + "；奖励此前已领取"
+				}
+			} else {
+				item["claim_error"] = cerr.Error()
+				item["message"] = msg + "；达标但领奖失败（可在列表手动重试）"
+			}
 		}
 		out = append(out, item)
 		time.Sleep(reportGap) // 项间节流
