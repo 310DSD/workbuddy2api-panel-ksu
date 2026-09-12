@@ -9,6 +9,7 @@ package scheduler
 import (
 	"encoding/json"
 	"log"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
@@ -28,8 +29,18 @@ func (s *Scheduler) RunStreakBonusNow() {
 	}
 }
 
-// streakBonusAccount 单账号：兑换所有已解锁档位 → 抽完所有 chances。
+// streakBonusAccount 单账号：补签保连登 → 礼包/补偿 → 兑换所有已解锁档位 → 抽完所有 chances。
 func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
+	// 0. 补签保连登：昨日漏签且有补签卡则补上（连续天数一断就要重攒 7 天）。
+	s.makeupYesterday(a)
+	// 0.5 礼包/补偿（每号一次，无则业务错误静默跳过）。
+	if credit, err := s.cfg.Upstream.ClaimGift(a); err == nil {
+		log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc", a.UID, credit)
+	}
+	if credit, err := s.cfg.Upstream.ClaimCompensation(a); err == nil {
+		log.Printf("streak-bonus %s: 🎊 补偿领取 +%dc", a.UID, credit)
+	}
+
 	full, err := s.cfg.Upstream.GrowthStreakFull(a)
 	if err != nil {
 		log.Printf("streak-bonus %s: %v", a.UID, err)
@@ -79,4 +90,23 @@ func compactJSON(raw json.RawMessage) string {
 		return s[:220] + "…"
 	}
 	return s
+}
+
+// makeupYesterday 昨日漏签且有补签卡时自动补签（保住连登连续天数）。
+// 无卡 / 无漏签 / 查询失败均静默（不影响主流程）。
+func (s *Scheduler) makeupYesterday(a *auth.Auth) {
+	missed, err := s.cfg.Upstream.HeatmapYesterdayMissed(a)
+	if err != nil || !missed {
+		return
+	}
+	full, err := s.cfg.Upstream.GrowthStreakFull(a)
+	if err != nil || full.MakeupCards.Balance <= 0 {
+		return
+	}
+	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	if err := s.cfg.Upstream.UseMakeupCard(a, yesterday); err != nil {
+		log.Printf("streak-bonus %s: 补签 %s 失败: %v", a.UID, yesterday, err)
+		return
+	}
+	log.Printf("streak-bonus %s: ★ 已用补签卡补签 %s（保连登）", a.UID, yesterday)
 }

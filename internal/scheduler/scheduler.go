@@ -27,6 +27,7 @@ type Config struct {
 	TravelHours    []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
 	ActivityHours  []int // 默认 [10]
 	KeepaliveHours []int // 默认 [22]
+	BlackcatHours  []int // 默认 [23]：夜猫子（23:00–08:00 计数窗口）
 
 	// CheckinDisabled 显式关闭签到排程（对应 config 的 schedule.checkin_enabled=false）。
 	// 禁用后不再有任何签到时点。旅行不再搭签到便车（已剥离为独立排程）。
@@ -37,6 +38,8 @@ type Config struct {
 	ActivityDisabled bool
 	// KeepaliveDisabled 显式关闭 token 保活排程（schedule.keepalive_enabled=false）。
 	KeepaliveDisabled bool
+	// BlackcatDisabled 显式关闭夜猫子排程（schedule.blackcat_enabled=false）。
+	BlackcatDisabled bool
 }
 
 // Scheduler 调度器。
@@ -74,6 +77,9 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.KeepaliveHours) == 0 {
 		cfg.KeepaliveHours = []int{22}
 	}
+	if len(cfg.BlackcatHours) == 0 {
+		cfg.BlackcatHours = []int{23}
+	}
 	return &Scheduler{
 		cfg:           cfg,
 		adoptTried:    make(map[string]string),
@@ -84,8 +90,8 @@ func New(cfg Config) *Scheduler {
 
 // Reconfigure 热更新排程参数（面板保存配置后调用）：改时点/开关并通知运行中的循环重算。
 // 空 hours 视为「未配置」保留原值（与 config.normalize 的回落语义一致）。
-func (s *Scheduler) Reconfigure(checkinHours, travelHours, activityHours, keepaliveHours []int,
-	checkinDisabled, travelDisabled, activityDisabled, keepaliveDisabled bool) {
+func (s *Scheduler) Reconfigure(checkinHours, travelHours, activityHours, keepaliveHours, blackcatHours []int,
+	checkinDisabled, travelDisabled, activityDisabled, keepaliveDisabled, blackcatDisabled bool) {
 	s.schedMu.Lock()
 	if len(checkinHours) > 0 {
 		s.cfg.CheckinHours = checkinHours
@@ -99,10 +105,14 @@ func (s *Scheduler) Reconfigure(checkinHours, travelHours, activityHours, keepal
 	if len(keepaliveHours) > 0 {
 		s.cfg.KeepaliveHours = keepaliveHours
 	}
+	if len(blackcatHours) > 0 {
+		s.cfg.BlackcatHours = blackcatHours
+	}
 	s.cfg.CheckinDisabled = checkinDisabled
 	s.cfg.TravelDisabled = travelDisabled
 	s.cfg.ActivityDisabled = activityDisabled
 	s.cfg.KeepaliveDisabled = keepaliveDisabled
+	s.cfg.BlackcatDisabled = blackcatDisabled
 	s.schedMu.Unlock()
 	poke(s.rearmSchedule)
 	poke(s.rearmBalance)
@@ -139,6 +149,7 @@ const (
 	taskTravel
 	taskActivity
 	taskKeepalive
+	taskBlackcat
 )
 
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
@@ -147,9 +158,9 @@ const (
 // 排程参数在 schedMu 下快照，与 Reconfigure 的并发写隔离。
 func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	s.schedMu.Lock()
-	checkinHours, keepaliveHours := s.cfg.CheckinHours, s.cfg.KeepaliveHours
+	checkinHours, keepaliveHours, blackcatHours := s.cfg.CheckinHours, s.cfg.KeepaliveHours, s.cfg.BlackcatHours
 	travelHours, activityHours := s.cfg.TravelHours, s.cfg.ActivityHours
-	checkinOff, keepaliveOff := s.cfg.CheckinDisabled, s.cfg.KeepaliveDisabled
+	checkinOff, keepaliveOff, blackcatOff := s.cfg.CheckinDisabled, s.cfg.KeepaliveDisabled, s.cfg.BlackcatDisabled
 	travelOff, activityOff := s.cfg.TravelDisabled, s.cfg.ActivityDisabled
 	s.schedMu.Unlock()
 
@@ -169,6 +180,9 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	}
 	if !keepaliveOff {
 		slots = append(slots, slot{nextFire(now, keepaliveHours), taskKeepalive})
+	}
+	if !blackcatOff {
+		slots = append(slots, slot{nextFire(now, blackcatHours), taskBlackcat})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -224,6 +238,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 					s.RunActivityNow()
 				case taskKeepalive:
 					s.RunKeepaliveNow()
+				case taskBlackcat:
+					s.RunBlackcatNow()
 				}
 			}
 		}

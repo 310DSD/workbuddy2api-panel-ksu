@@ -116,6 +116,12 @@ var autoActions = []autoAction{
 		Desc:     "设置主题 API + 皮肤生效事件（已验证：两账号点亮）",
 		run:      runAppearance,
 	},
+	{
+		TaskCode: "black_cat",
+		Desc:     "夜猫子：23:00–08:00 窗口内 glm-5.2 对话补足（窗口外提示稍后再试）",
+		Attempt:  true,
+		run:      runBlackCat,
+	},
 }
 
 // autoActionFor 查任务对应的动作；无则返回 nil（不可自动化）。
@@ -418,6 +424,27 @@ func runLibraryRead(p *Panel, a *auth.Auth) (string, error) {
 		return "", err
 	}
 	return "已上报资料库介绍阅读事件", nil
+}
+
+// runBlackCat 完成 black_cat（夜猫子，夜间 23:00–08:00 计数）。
+// 判据 = 夜间窗口内 glm-5.2 真实对话 + chat 事件上报（WorkBuddy-Daily 实测口径）。
+// 窗口外不做（提示等排程）；网关 blackcat_hours（默认 23 点）排程会自动补足。
+func runBlackCat(p *Panel, a *auth.Auth) (string, error) {
+	if !upstream.InNightWindow(time.Now()) {
+		return "当前不在 23:00–08:00 计数窗口，行为不计分；网关会在每日 23 点自动补足", nil
+	}
+	need, err := p.cfg.Upstream.BlackcatNeed(a)
+	if err != nil {
+		return "", err
+	}
+	if need <= 0 {
+		return "进度已达标，无需补足", nil
+	}
+	ok, err := p.cfg.Upstream.RunNightChats(a, int(need))
+	if err != nil {
+		return fmt.Sprintf("完成 %d/%d 次后中断: %v", ok, need, err), nil
+	}
+	return fmt.Sprintf("已完成 %d 次夜间对话并上报", ok), nil
 }
 
 // runAppearance 完成 Hp_Appearance（换主题）。

@@ -121,10 +121,12 @@ func main() {
 		TravelHours:       cfg.Schedule.TravelHours,
 		ActivityHours:     cfg.Schedule.ActivityHours,
 		KeepaliveHours:    cfg.Schedule.KeepaliveHours,
+		BlackcatHours:     cfg.Schedule.BlackcatHours,
 		CheckinDisabled:   !cfg.Schedule.CheckinEnabled,
 		TravelDisabled:    !cfg.Schedule.TravelEnabled,
 		ActivityDisabled:  !cfg.Schedule.ActivityEnabled,
 		KeepaliveDisabled: !cfg.Schedule.KeepaliveEnabled,
+		BlackcatDisabled:  !cfg.Schedule.BlackcatEnabled,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -148,6 +150,12 @@ func main() {
 		log.Printf("token 保活已禁用（schedule.keepalive_enabled=false）")
 	} else {
 		log.Printf("token 保活已启用：%v 点", cfg.Schedule.KeepaliveHours)
+	}
+	switch {
+	case !cfg.Schedule.BlackcatEnabled:
+		log.Printf("夜猫子已禁用（schedule.blackcat_enabled=false）")
+	default:
+		log.Printf("夜猫子已启用：%v 点（23:00–08:00 窗口 glm-5.2 对话补足）", cfg.Schedule.BlackcatHours)
 	}
 	switch {
 	case !cfg.Schedule.BalanceRefreshEnabled:
@@ -296,9 +304,9 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	sch.Reconfigure(
 		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,
-		newCfg.Schedule.ActivityHours, newCfg.Schedule.KeepaliveHours,
+		newCfg.Schedule.ActivityHours, newCfg.Schedule.KeepaliveHours, newCfg.Schedule.BlackcatHours,
 		!newCfg.Schedule.CheckinEnabled, !newCfg.Schedule.TravelEnabled,
-		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled)
+		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled, !newCfg.Schedule.BlackcatEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 
 	return restartRequiredFields(newCfg), nil

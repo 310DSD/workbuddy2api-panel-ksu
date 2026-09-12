@@ -65,6 +65,7 @@ func TestNextWakeSameInstantFiresAll(t *testing.T) {
 		KeepaliveHours:   []int{22},
 		TravelDisabled:   true,
 		ActivityDisabled: true,
+		BlackcatDisabled: true,
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 21, 30, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
@@ -119,13 +120,14 @@ func TestNextWakeKeepaliveDisabled(t *testing.T) {
 	}
 }
 
-// TestNextWakeBothDisabledNothingScheduled 四类任务都显式禁用 → 无可唤醒时点。
+// TestNextWakeBothDisabledNothingScheduled 五类任务都显式禁用 → 无可唤醒时点。
 func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
 	s := New(Config{
 		CheckinDisabled:   true,
 		TravelDisabled:    true,
 		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
+		BlackcatDisabled:  true,
 		CheckinHours:      []int{9, 21},
 		KeepaliveHours:    []int{22},
 	})
