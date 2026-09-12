@@ -117,6 +117,11 @@ var autoActions = []autoAction{
 		run:      runAppearance,
 	},
 	{
+		TaskCode: "skill_1",
+		Desc:     "真实对话 + skill_info 技能加载事件（已验证：人杰2 点亮）",
+		run:      runSkillFresh,
+	},
+	{
 		TaskCode: "Expert_lighthouse",
 		Desc:     "真实轻量云专家召唤+使用链（chat 链带 has_expert，已验证：两账号点亮）",
 		run:      runExpertLighthouse,
@@ -450,6 +455,42 @@ func runBlackCat(p *Panel, a *auth.Auth) (string, error) {
 		return fmt.Sprintf("完成 %d/%d 次后中断: %v", ok, need, err), nil
 	}
 	return fmt.Sprintf("已完成 %d 次夜间对话并上报", ok), nil
+}
+
+// runSkillFresh 完成 skill_1（尝鲜热门技能）。
+// 2026-09-12 判据（紫川手动完成抓包 row 209）：`skill_info` 事件（桌面指纹）——
+// {id:<技能名>, skillId, skillVersion, toolStatus:"success", fileCount,
+// source:"workbuddy-desktop"} JOIN 真实会话（conversationId/requestId=服务端
+// id）。此前的 skill_request_send/skill_installed/skill_action 全是错误方向。
+// 人杰2 实测 0/1 → 1/1 点亮。
+func runSkillFresh(p *Panel, a *auth.Auth) (string, error) {
+	conv, req, err := p.cfg.Upstream.DesktopChatWithExpert(a, "")
+	if err != nil {
+		return "", fmt.Errorf("真实对话: %w", err)
+	}
+	msgID := "msg-" + req[len(req)-8:]
+	events := upstream.DesktopChatSequence(conv, req, msgID, "fast-model", "fast-model")
+	for _, ev := range events {
+		if ev["eventCode"] == "chat_message_response" {
+			ev["finishReason"] = "tool_calls" // 模型发起工具调用（技能加载）语义
+		}
+	}
+	events = append(events, upstream.DesktopEvent{
+		"eventCode": "skill_info",
+		"id":        "润泽小馆·日报撰写",
+		"skillId":   "skill_2097350077599879168",
+		"skillVersion": "1.0.0",
+		"toolStatus":   "success",
+		"fileCount":    56,
+		"source":       "workbuddy-desktop",
+		"conversationId": conv, "requestId": req, "messageId": msgID,
+		"requestModelId": "fast-model", "requestModelName": "fast-model",
+		"traceId": req,
+	})
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
+		return "", fmt.Errorf("skill_info 事件: %w", err)
+	}
+	return "已上报真实对话 + skill_info 技能加载事件", nil
 }
 
 // runExpertLighthouse 完成 Expert_lighthouse（体验「腾讯轻量云」专家）。
