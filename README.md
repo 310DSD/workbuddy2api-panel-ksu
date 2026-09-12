@@ -642,17 +642,21 @@ http://127.0.0.1:7863/panel/
 
 ### Docker 部署登录后报「写入 auths/…json.tmp 失败： permission denied」？
 
-容器以 `app` 用户（uid 10001）运行，而宿主机挂载的 `./auths`、`./data` 目录属主不是它——写凭证 tmp 文件被拒。两种解法任选：
+容器以 `app` 用户（uid 10001）运行，而宿主机挂载的 `./auths`、`./data` 目录属主不是它——写凭证 tmp 文件被拒。三种解法任选（前两种均**无需 root 容器**）：
 
 ```bash
-# 方案 1（推荐）：把挂载目录属主交给容器用户
+# 方案 1（推荐，非 root）：让容器以你自己的 uid 运行——挂载目录本来就是你建的
+PUID=$(id -u) PGID=$(id -g) docker compose up -d --force-recreate
+# 或写进 .env 文件长期生效（.env 已被 .gitignore 忽略）：
+#   echo "PUID=1000" > .env && echo "PGID=1000" >> .env
+
+# 方案 2：把挂载目录属主交给容器默认用户（需要 sudo）
 sudo chown -R 10001:10001 ./auths ./data ./config.json
 
-# 方案 2：docker-compose.yml 的服务下取消注释 user: "0:0"（root 运行）
-docker compose up -d --force-recreate
+# 方案 3：compose 设 user: "0:0" 以 root 运行（NAS/群晖不便 chown 时用）
 ```
 
-报错信息里自带这条指引（v1.4.1 起）；NAS / 群晖等不便 chown 的环境用方案 2。
+报错信息里自带这条指引；compose 的 `user` 已参数化为 `${PUID:-10001}:${PGID:-10001}`。
 
 ### 账号被 Disable 后如何恢复？
 
