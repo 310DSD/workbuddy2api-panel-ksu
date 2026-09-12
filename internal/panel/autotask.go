@@ -213,6 +213,13 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 			"该任务需要客户端内交互（无对应接口），无法自动完成；请按任务说明在官方客户端操作")
 		return
 	}
+	// per-account 互斥：同账号的任务动作正在跑（单任务或全量）时直接 409，
+	// 不并发重跑（动作幂等但 expert/skill 系含真实对话，重跑浪费配额）。
+	if !p.tryLockAccount(uid) {
+		writeErr(w, http.StatusConflict, "该账号有任务动作正在执行中，请等本轮结束后再试")
+		return
+	}
+	defer p.unlockAccount(uid)
 	// 前置读取：已完成的任务直接跳过（幂等，不浪费上游调用）。
 	before, err := p.taskByCode(a, act.TaskCode)
 	if err != nil {
@@ -760,16 +767,26 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
+	// per-account 互斥（与单任务动作共用一把锁）：重复点击 409。
+	if !p.tryLockAccount(uid) {
+		writeErr(w, http.StatusConflict, "该账号有任务动作正在执行中，请等本轮结束后再试")
+		return
+	}
 	// 用 context 兜底超时（多项任务串联 + 每项含真实对话，可能耗时较长）。
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
 	done := make(chan []map[string]any, 1)
-	go func() { done <- p.runAutoAll(a) }()
+	go func() {
+		defer p.unlockAccount(uid) // 流水线真正结束（而非 HTTP 超时返回）才放锁
+		done <- p.runAutoAll(a)
+	}()
 	select {
 	case results := <-done:
 		log.Printf("panel: 一键完成可自动任务 uid=%s 共 %d 项", uid, len(results))
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": results})
 	case <-ctx.Done():
+		// HTTP 侧超时返回，但后台流水线仍在跑——锁在流水线 goroutine 内释放，
+		// 期间重复点击会被 409 挡住，不会出现两轮并发。
 		writeErr(w, http.StatusGatewayTimeout, "执行超时（任务仍在后台继续）")
 	}
 }

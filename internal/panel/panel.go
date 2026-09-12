@@ -63,6 +63,38 @@ type Panel struct {
 	// poll 成功或超时（loginTTL）后剔除；面板常驻进程，容量天然有界。
 	loginMu sync.Mutex
 	logins  map[string]time.Time
+
+	// taskMu/taskLocks 一键完成任务的 per-account 互斥：同一账号的任务动作
+	// （单任务 / 全量）同时只允许一条在跑。重复点击直接返回 409"仍在执行"，
+	// 而不是并发跑两遍浪费上游请求（动作虽幂等，expert 系每遍含 8 次真实对话）。
+	// 不同账号之间不互斥（并行照旧）。TryLock 语义，锁条目常驻（账号数有界）。
+	taskMu    sync.Mutex
+	taskLocks map[string]*sync.Mutex
+}
+
+// tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
+func (p *Panel) tryLockAccount(uid string) bool {
+	p.taskMu.Lock()
+	if p.taskLocks == nil {
+		p.taskLocks = make(map[string]*sync.Mutex)
+	}
+	mu := p.taskLocks[uid]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		p.taskLocks[uid] = mu
+	}
+	p.taskMu.Unlock()
+	return mu.TryLock()
+}
+
+// unlockAccount 释放账号任务锁（与 tryLockAccount 配对）。
+func (p *Panel) unlockAccount(uid string) {
+	p.taskMu.Lock()
+	mu := p.taskLocks[uid]
+	p.taskMu.Unlock()
+	if mu != nil {
+		mu.Unlock()
+	}
 }
 
 // loginTTL 授权 URL 的最长有效期：超时的 state 直接回收，
