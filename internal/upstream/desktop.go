@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"time"
 
@@ -454,11 +455,20 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	if expertID != "" {
 		h.Set("X-Expert-Id", expertID)
 	}
+	if os.Getenv("WB2A_DEBUG_CHAT") != "" {
+		fmt.Printf("[dbg] URL=%s\n", req.URL)
+		for k := range req.Header {
+			fmt.Printf("[dbg] %s: %s\n", k, req.Header.Get(k))
+		}
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return "", "", err
 	}
 	defer resp.Body.Close()
+	if os.Getenv("WB2A_DEBUG_CHAT") != "" {
+		fmt.Printf("[dbg] status=%d enc=%q\n", resp.StatusCode, resp.Header.Get("Content-Encoding"))
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
 		return "", "", fmt.Errorf("chat http %d: %s", resp.StatusCode, b)
@@ -470,10 +480,20 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 		n, rerr := resp.Body.Read(tmp)
 		if n > 0 {
 			buf = append(buf, tmp[:n]...)
+			if os.Getenv("WB2A_DEBUG_CHAT") != "" {
+				dbg := string(tmp[:n])
+				if len(dbg) > 120 {
+					dbg = dbg[:120]
+				}
+				fmt.Printf("[dbg-rd %d] %q\n", n, dbg)
+			}
 			if i := bytes.Index(buf, []byte(`"id":"`)); i >= 0 {
-				rest := buf[i+7:]
+				rest := buf[i+6:]
 				if end := bytes.IndexByte(rest, '"'); end > 0 {
 					id := string(rest[:end])
+					if os.Getenv("WB2A_DEBUG_CHAT") != "" {
+						fmt.Printf("[dbg-id] %q match=%v\n", id, idRegex.MatchString(id))
+					}
 					if idRegex.MatchString(id) {
 						return conversationID, id, nil
 					}
@@ -525,6 +545,21 @@ func DesktopExpertSummonSequence(e MarketExpert) []DesktopEvent {
 // DesktopExpertActualUseEvent 构造「专家真实使用」事件（expert_5/Expert_team_use_3 计数）。
 // requestID 必须是 DesktopChatWithExpert 返回的服务端 requestId。
 func DesktopExpertActualUseEvent(e MarketExpert, conversationID, requestID string) DesktopEvent {
+	ev := desktopExpertActualUse(e, conversationID, requestID)
+	ev["mode"] = "craft"
+	return ev
+}
+
+// DesktopExpertActualUseLocal mode:"LOCAL" 变体（Expert_lighthouse 判据要求 LOCAL，
+// 对齐真实样本 Sunny row 868：轻量云专家使用时 mode=LOCAL、type 为空、cost=0）。
+func DesktopExpertActualUseLocal(e MarketExpert, conversationID, requestID string) DesktopEvent {
+	ev := desktopExpertActualUse(e, conversationID, requestID)
+	ev["mode"] = "LOCAL"
+	return ev
+}
+
+// desktopExpertActualUse expert_actual_use 公共载荷。
+func desktopExpertActualUse(e MarketExpert, conversationID, requestID string) DesktopEvent {
 	cat := "expert-all"
 	if len(e.Categories) > 0 {
 		if s, ok := e.Categories[0].(string); ok {
@@ -536,7 +571,7 @@ func DesktopExpertActualUseEvent(e MarketExpert, conversationID, requestID strin
 		ver = "1.0.0"
 	}
 	return DesktopEvent{
-		"eventCode": "expert_actual_use", "mode": "craft",
+		"eventCode": "expert_actual_use",
 		"id": e.ExpertID, "name": e.DisplayNameZH, "expertTitle": e.ProfessionZH,
 		"type": cat, "expertType": e.ExpertType, "source": "builtin", "version": ver,
 		"cost": 9000, "characterCount": 14,

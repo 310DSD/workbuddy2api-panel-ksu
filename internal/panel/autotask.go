@@ -117,6 +117,11 @@ var autoActions = []autoAction{
 		run:      runAppearance,
 	},
 	{
+		TaskCode: "Expert_lighthouse",
+		Desc:     "真实轻量云专家召唤+使用链（chat 链带 has_expert，已验证：两账号点亮）",
+		run:      runExpertLighthouse,
+	},
+	{
 		TaskCode: "black_cat",
 		Desc:     "夜猫子：23:00–08:00 窗口内 glm-5.2 对话补足（窗口外提示稍后再试）",
 		Attempt:  true,
@@ -445,6 +450,52 @@ func runBlackCat(p *Panel, a *auth.Auth) (string, error) {
 		return fmt.Sprintf("完成 %d/%d 次后中断: %v", ok, need, err), nil
 	}
 	return fmt.Sprintf("已完成 %d 次夜间对话并上报", ok), nil
+}
+
+// runExpertLighthouse 完成 Expert_lighthouse（体验「腾讯轻量云」专家）。
+// 2026-09-12 判据（真实样本 Sunny row 868）：与 expert_5 同构，但两处差异——
+// chat 链的 agent_task_created 需带 has_expert:true + expert_id（我们默认 false），
+// expert_actual_use 的 mode 为 "LOCAL"（非 craft）。id 固定为轻量云专家
+// ex_2cvvUZQhDyeJ；requestId 必须是真实 chat 的服务端 id。紫川/人杰2 实测点亮。
+func runExpertLighthouse(p *Panel, a *auth.Auth) (string, error) {
+	const lhID = "ex_2cvvUZQhDyeJ"
+	lh := upstream.MarketExpert{
+		ExpertID: lhID, ExpertType: "agent",
+		DisplayNameZH: "腾讯轻量云专家", ProfessionZH: "腾讯轻量云专家", Version: "1.0.2",
+	}
+	// 市场列表若命中真实条目则用其信息（version 等以服务端为准）。
+	if experts, err := p.cfg.Upstream.MarketExpertList(a, "agent"); err == nil {
+		for _, e := range experts {
+			if e.ExpertID == lhID {
+				lh = e
+				break
+			}
+		}
+	}
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopExpertSummonSequence(lh)...); err != nil {
+		return "", fmt.Errorf("召唤链: %w", err)
+	}
+	conv, req, err := p.cfg.Upstream.DesktopChatWithExpert(a, lhID)
+	if err != nil {
+		return "", fmt.Errorf("真实对话: %w", err)
+	}
+	events := upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model")
+	for _, ev := range events {
+		if ev["eventCode"] == "agent_task_created" {
+			ev["has_expert"] = true
+			ev["expert_id"] = lh.ExpertID
+			ev["expert_name"] = lh.DisplayNameZH
+			ev["expert_industry_id"] = ""
+		}
+	}
+	events = append(events, upstream.DesktopExpertActualUseLocal(lh, conv, req))
+	// 对齐真实样本细节：轻量云专家 actual_use 的 type 为空、cost=0。
+	events[len(events)-1]["type"] = ""
+	events[len(events)-1]["cost"] = 0
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
+		return "", fmt.Errorf("使用事件: %w", err)
+	}
+	return "已上报轻量云专家召唤+使用链（真实对话 requestId）", nil
 }
 
 // runAppearance 完成 Hp_Appearance（换主题）。
