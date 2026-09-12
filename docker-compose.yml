@@ -10,4 +10,8 @@ services:
     volumes:
       - ./auths:/app/auths
       - ./data:/app/data
-      - ./config.json:/app/config.json:ro
+      # 注意：宿主机必须先有 config.json（cp config.example.json config.json）。
+      # 缺失时 Docker 会把挂载点创建成目录 → 容器启动失败（程序会自动生成配置，
+      # 但前提是它能以文件形式写入 —— 挂载目录会挡住这条路径）。
+      # 不挂 :ro：面板「配置」页需要写回此文件（保存后热生效）。
+      - ./config.json:/app/config.json

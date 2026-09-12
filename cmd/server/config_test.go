@@ -755,3 +755,25 @@ func TestUpstreamUserAgentConfig(t *testing.T) {
 		t.Errorf("env user_agent=%q want EnvAgent/9", c3.Upstream.UserAgent)
 	}
 }
+
+// TestLoadConfigPathIsDirectory config 路径是目录时给出可操作提示（Docker bind mount 陷阱）。
+// 复现：compose 挂载 ./config.json 但宿主机缺该文件 → Docker 创建同名目录 → 启动失败。
+// 旧行为只报 "read config: ... Incorrect function" 之类晦涩错误，无从排查。
+func TestLoadConfigPathIsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	asDir := filepath.Join(dir, "config.json")
+	if err := os.Mkdir(asDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(asDir)
+	if err == nil {
+		t.Fatal("want error when config path is a directory")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "是目录") {
+		t.Errorf("error should explain it is a directory: %v", err)
+	}
+	if !strings.Contains(msg, "config.example.json") {
+		t.Errorf("error should suggest the fix (cp config.example.json): %v", err)
+	}
+}

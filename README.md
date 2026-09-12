@@ -109,72 +109,44 @@ flowchart LR
 
 ### 环境要求
 
-- **Docker + Docker Compose**（推荐部署方式，镜像内已含 `app` 低权限用户与全部工具脚本）
+- **Docker + Docker Compose**（服务端部署方式，镜像内已含低权限用户与全部工具脚本）——或
+- **Windows / macOS / Linux 直接跑单文件二进制**（无需 Docker，见下方「Windows 单文件运行」）
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
-- 宿主机 Go ≥ 1.22（仅源码构建时需要）
+- 宿主机 Go ≥ 1.22（仅从源码构建时需要）
 
-### Docker Compose 一键部署
+### 方式一：Docker Compose（推荐服务器部署）
 
 ```bash
+# 1. 克隆
 git clone https://github.com/linguo2625469/workbuddy2api-panel.git
 cd workbuddy2api-panel
-```
 
-配置文件**首次启动自动生成**：目录下没有 `config.json` 时，程序会落一份推荐配置（含 `crypto/rand` 随机生成的 `api_key`，启动日志会打印一次），之后直接读取。也可以手工先行：
+# 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
+cp config.example.json config.json
+#    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
 
-```bash
-cp config.example.json config.json   # 可选：想自己预写配置时
-```
-
-`api_key` 留空 = 不鉴权（公网部署务必设置）。示例中的 `test_key` 等均为占位符，`config.example.json` 不含任何真实密钥。
-
-### 2. 登录添加账号
-
-**方式 A：Web 面板（推荐，免命令行）**
-
-启动服务后打开 `http://127.0.0.1:7863/panel/`，点右上角「**添加账号**」：面板展示授权链接 → 浏览器完成登录 → 自动检测并落盘凭证 → **热加载进池（无需重启）**，顺带完成首次签到。
-
-**方式 B：命令行脚本**
-
-```bash
-# 登录添加账号（重复执行可加多号）
-./login.sh
-
-# 启动服务
+# 3. 启动（首次会构建镜像，约 1-2 分钟）
 docker compose up -d --build
 
-# 健康检查（无可用账号时 503）；service 字段用于确认打到的是本网关
+# 4. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
-# {"healthy":2,"total":3,"service":"workbuddy2api"}
+# {"healthy":0,"total":0,"service":"workbuddy2api"}
 ```
 
-`login.sh` 内置授权 URL 获取 + 浏览器登录 + token 轮询 + 首次签到 + `auths/workbuddy-<uid>.json` 落盘 + 容器重启，全程无 PKCE（state 由服务端签发）。账号池在容器启动时用 `auths/` 目录自动对齐，新增凭证文件即自动发现。
-（注：`login.sh` 依赖 bash + python3，**Windows 用户请用方式 A** 或 WSL。）
+启动后打开 **`http://localhost:7863/panel/`**，用面板「添加账号」完成登录（见下节）。
 
-### 源码构建
+常用运维命令：
 
 ```bash
-go build ./...
-go vet ./...
-go test ./...      # 完整测试套件
-go run ./cmd/server -config config.json
+docker compose logs -f          # 跟踪日志
+docker compose restart          # 重启
+docker compose down             # 停止并移除容器（数据在 ./auths 与 ./data，不受影响）
 ```
 
-构建二进制：
-
-```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o signin_bin ./cmd/signin
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o login ./cmd/login
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
-```
-
-### Windows 单文件运行（无需 Docker）
-
-本分支针对 Windows 原生运行做了适配（无需 Docker / WSL）：
+### 方式二：Windows 单文件运行（无需 Docker）
 
 ```powershell
-# 1) 构建（或直接下载 Release 中的 wb2api.exe）
+# 1) 下载 Release 中的 wb2api.exe，或从源码构建
 go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
 
 # 2) 直接运行：首次启动自动生成 config.json（含随机 api_key，日志打印一次）
@@ -185,6 +157,41 @@ go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
 ```
 
 exe 为**单文件自包含**（前端资源已 embed 进二进制），拷到任意 Windows 机器即可运行，只需保证 `auths/`（凭证）与 `data/`（状态）目录可写。
+
+### 方式三：源码运行（开发调试）
+
+```bash
+go build ./...
+go vet ./...
+go test ./...                      # 完整测试套件
+go run ./cmd/server -config config.json
+```
+
+构建全部二进制：
+
+```bash
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o signin_bin ./cmd/signin
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o login ./cmd/login
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
+```
+
+### 添加账号（登录）
+
+**方式 A：Web 面板（推荐，各平台通用，免命令行）**
+
+打开 `http://127.0.0.1:7863/panel/`，点右上角「**添加账号**」：面板展示授权链接 → 浏览器完成登录 → 自动检测并落盘凭证 → **热加载进池（无需重启）**，顺带完成首次签到。
+
+**方式 B：命令行脚本（仅 Linux / macOS，依赖 bash + python3）**
+
+```bash
+./login.sh
+# 按提示在浏览器打开授权链接 → 回到终端确认 → 凭证落盘 auths/workbuddy-<uid>.json
+```
+
+`login.sh` 内置授权 URL 获取 + 浏览器登录 + token 轮询 + 首次签到 + 凭证落盘 + 容器重启，全程无 PKCE（state 由服务端签发）。账号池在容器启动时用 `auths/` 目录自动对齐，新增凭证文件即自动发现。
+
+> Windows 用户请用方式 A（或 WSL）；`login.sh` 需要 python3。
 
 ### 验证
 
