@@ -640,6 +640,20 @@ http://127.0.0.1:7863/panel/
 - 收到 `413` 即表示是请求体本身超限（多图 / 超长上下文场景），调大 `server.max_body_mb` 即可（`WB2A_MAX_BODY_MB` 环境变量同样生效）
 - 要么放行要么明确 `413`，网关不再把半截请求体喂给上游
 
+### Docker 部署登录后报「写入 auths/…json.tmp 失败： permission denied」？
+
+容器以 `app` 用户（uid 10001）运行，而宿主机挂载的 `./auths`、`./data` 目录属主不是它——写凭证 tmp 文件被拒。两种解法任选：
+
+```bash
+# 方案 1（推荐）：把挂载目录属主交给容器用户
+sudo chown -R 10001:10001 ./auths ./data ./config.json
+
+# 方案 2：docker-compose.yml 的服务下取消注释 user: "0:0"（root 运行）
+docker compose up -d --force-recreate
+```
+
+报错信息里自带这条指引（v1.4.1 起）；NAS / 群晖等不便 chown 的环境用方案 2。
+
 ### 账号被 Disable 后如何恢复？
 
 - **用 `./login.sh` 重新登录**覆盖凭证，重启后自动回池；

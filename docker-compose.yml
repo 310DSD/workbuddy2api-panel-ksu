@@ -3,6 +3,11 @@ services:
     build: .
     container_name: workbuddy2api
     restart: unless-stopped
+    # 容器默认以 app 用户（uid 10001）运行。若宿主机挂载目录属主不同导致
+    # 「写入 auths/*.json.tmp 失败 permission denied」，两种解法任选：
+    #   1) 宿主机执行：sudo chown -R 10001:10001 ./auths ./data ./config.json
+    #   2) 取消下一行注释以 root 运行（省事但容器逃逸面更大，自担）
+    # user: "0:0"
     environment:
       - TZ=Asia/Shanghai
     ports:

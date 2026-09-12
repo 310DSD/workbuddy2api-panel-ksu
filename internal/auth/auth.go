@@ -4,7 +4,9 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,7 +142,15 @@ func (a *Auth) SaveAtomic() error {
 	}
 	tmp := a.FilePath + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
+		// Docker bind-mount 权限问题的典型现场：容器内 app 用户（uid 10001）
+		// 对宿主机挂载目录无写权限。给出可操作指引而不是裸 syscall 错误。
+		msg := fmt.Sprintf("写入 %s 失败: %v", tmp, err)
+		if errors.Is(err, fs.ErrPermission) {
+			msg += "\n（Docker 部署：宿主机挂载目录需可被容器内 app 用户写入。" +
+				"执行 sudo chown -R 10001:10001 ./auths ./data 后重试；" +
+				"或在 docker-compose.yml 服务下加 user: \"0:0\" 以 root 运行）"
+		}
+		return errors.New(msg)
 	}
 	return os.Rename(tmp, a.FilePath)
 }
