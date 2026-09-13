@@ -86,7 +86,8 @@ func desktopFingerprint(a *auth.Auth) map[string]any {
 }
 
 // ReportDesktopEvent 以桌面客户端指纹向 copilot.tencent.com/v2/report 批量上报事件。
-// events 为业务载荷（eventCode 等字段由调用方给出）；公共指纹自动注入并覆盖同名键。
+// events 为业务载荷（eventCode 等字段由调用方给出）；公共指纹自动注入，
+// 业务字段优先（可用于覆盖 qimei36/machineId 等设备标识做真实设备对齐）。
 func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error {
 	if len(events) == 0 {
 		return fmt.Errorf("desktop report: no events")
@@ -95,10 +96,10 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	arr := make([]map[string]any, 0, len(events))
 	for _, ev := range events {
 		m := map[string]any{}
-		for k, v := range ev {
+		for k, v := range fp {
 			m[k] = v
 		}
-		for k, v := range fp {
+		for k, v := range ev {
 			m[k] = v
 		}
 		arr = append(arr, m)

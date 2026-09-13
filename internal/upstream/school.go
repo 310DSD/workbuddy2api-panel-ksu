@@ -73,6 +73,12 @@ func (c *Client) SchoolShareComplete(a *auth.Auth) error {
 		map[string]any{"channel": "wechat"}, nil)
 }
 
+// SchoolTaskViewed 标记任务已查看（pending → in_progress）。desktop_chat_1_time
+// 等任务的计数前置：必须先激活（in_progress）后的行为才计数（三账号实测）。
+func (c *Client) SchoolTaskViewed(a *auth.Auth, taskCode string) error {
+	return c.schoolJSON(a, http.MethodPost, "/tasks/"+taskCode+"/viewed", map[string]any{}, nil)
+}
+
 // SchoolClaimTask 领取任务奖励（返回获得的抽奖次数）。
 func (c *Client) SchoolClaimTask(a *auth.Auth, taskCode string) (chanceGranted int, err error) {
 	var out struct {

@@ -70,6 +70,10 @@ func (s *Scheduler) schoolAccount(a *auth.Auth) {
 		log.Printf("school %s: share-complete 上报后未点亮（明日重试）", a.UID)
 		return
 	}
+	// desktop_chat_1_time（单次 +100c+1抽）：判据 = viewed 激活 + 真实 chat（服务端
+	// requestId）+ 桌面六事件链（三账号实测，2026-09-13）。单次任务，做完终身跳过。
+	s.schoolDesktopTask(a)
+
 	granted, err := s.cfg.Upstream.SchoolClaimTask(a, "share_invite")
 	if err != nil {
 		log.Printf("school %s: claim: %v", a.UID, err)
@@ -90,6 +94,49 @@ func (s *Scheduler) schoolAccount(a *auth.Auth) {
 		log.Printf("school %s: 🎲 %s", a.UID, prize)
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// schoolDesktopTask 完成 desktop_chat_1_time：viewed 激活 → 真实 chat → 六事件链。
+func (s *Scheduler) schoolDesktopTask(a *auth.Auth) {
+	tasks, _, err := s.cfg.Upstream.SchoolTasks(a)
+	if err != nil {
+		return
+	}
+	t := findSchoolTask(tasks, "desktop_chat_1_time")
+	if t == nil || t.Status == "claimed" || t.Progress >= t.TargetCount {
+		return
+	}
+	if t.Status == "pending" {
+		if err := s.cfg.Upstream.SchoolTaskViewed(a, "desktop_chat_1_time"); err != nil {
+			log.Printf("school %s: desktop viewed: %v", a.UID, err)
+			return
+		}
+	}
+	conv, req, err := s.cfg.Upstream.DesktopChatWithExpert(a, "")
+	if err != nil {
+		log.Printf("school %s: desktop chat: %v", a.UID, err)
+		return
+	}
+	events := upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model")
+	if err := s.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
+		log.Printf("school %s: desktop events: %v", a.UID, err)
+		return
+	}
+	// 异步计分轮询后领奖（失败不阻塞 share 主流程）。
+	for i := 0; i < schoolPollLoops; i++ {
+		time.Sleep(schoolPollGap)
+		tasks2, _, err := s.cfg.Upstream.SchoolTasks(a)
+		if err != nil {
+			continue
+		}
+		if t2 := findSchoolTask(tasks2, "desktop_chat_1_time"); t2 != nil && t2.Progress >= t2.TargetCount {
+			if granted, err := s.cfg.Upstream.SchoolClaimTask(a, "desktop_chat_1_time"); err == nil {
+				log.Printf("school %s: ★ 桌面端体验任务完成 +100c +%d 抽奖", a.UID, granted)
+			}
+			return
+		}
+	}
+	log.Printf("school %s: desktop_chat_1_time 未点亮（明日重试）", a.UID)
 }
 
 // findSchoolTask 按任务码查条目。
