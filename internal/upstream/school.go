@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
@@ -117,4 +118,130 @@ func (c *Client) SchoolDraw(a *auth.Auth) (string, error) {
 		return fmt.Sprintf("%s +%dc", out.PrizeCode, out.CreditAmount), nil
 	}
 	return out.PrizeCode, nil
+}
+
+// ---- 开学季 chat_3_times / expert_use（2026-09-14 判据破解）----
+// 判据 = v2/report 埋点计数（与成长任务同一事件管道，三账号实测）：
+//   - chat_3_times：3 条 chat_request_send 即 3/3（conversationId 任意、桌面/mp
+//     头族均可计数，无需真实沙箱会话）。
+//   - expert_use：mp 指纹事件链 expert_summon_click + expert_summoned +
+//     expert_actual_use + chat_request_send（开学季分类专家）即点亮。
+
+const mpReportPath = "/v2/report"
+
+// mpEventBase 小程序埋点公共指纹（appservice wQ()+Ao() 对齐）。
+func mpEventBase(a *auth.Auth) map[string]any {
+	return map[string]any{
+		"timestamp":   time.Now().UnixMilli(),
+		"ideType":     "WorkBuddy_MP",
+		"ideVersion":  "2.4.0",
+		"extName":     "workbuddy-mp",
+		"extVersion":  "2.4.0",
+		"product":     "SaaS",
+		"ideName":     "wx_app_cloud",
+		"platform":    "mini_program",
+		"os":          "windows",
+		"osVersion":   "11",
+		"arch":        "x64",
+		"machineId":   "0655736a-607f-4d9d-b430-58176ee9a090",
+		"timezone":  "Asia/Shanghai",
+		"userId":      a.UID,
+		"userNickname": a.Nickname,
+	}
+}
+
+// ReportMPEvent 以小程序指纹向 www.codebuddy.cn/v2/report 批量上报事件。
+func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
+	if len(events) == 0 {
+		return fmt.Errorf("mp report: no events")
+	}
+	base := mpEventBase(a)
+	arr := make([]map[string]any, 0, len(events))
+	for _, ev := range events {
+		m := map[string]any{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for k, v := range ev {
+			m[k] = v
+		}
+		arr = append(arr, m)
+	}
+	raw, err := json.Marshal(arr)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.BillingBaseCN+mpReportPath, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if a.UID != "" {
+		req.Header.Set("X-User-Id", a.UID)
+	}
+	req.Header.Set("X-Client-Product", "workbuddy-mp")
+	req.Header.Set("X-Client-Version", "2.4.0")
+	req.Header.Set("X-Client-Platform", "mp-weixin")
+	req.Header.Set("X-Platform", "wechatmp")
+	_, err = c.doJSON(req)
+	return err
+}
+
+// SchoolChatTimesEvents 构造一条 chat_request_send 事件（chat_3_times 计数）。
+func SchoolChatTimesEvents(conversationID string) map[string]any {
+	rid := "wb2api-" + clientToken()
+	return map[string]any{
+		"eventCode": "chat_request_send",
+		"inputLength": 14, "isPlan": false, "isAutoExecuteTerminal": false,
+		"isAutoModify": false, "codebaseEnable": false, "maxToken": 0,
+		"maxSteps": 500, "temperature": 0, "maxRetries": 0,
+		"mentionContexts": []any{}, "knowledgeId": []any{}, "knowledgeName": []any{},
+		"codebaseId": "", "mentionContextCount": 0, "command": "",
+		"recommendId": "", "skillId": "", "skillCount": 0, "totalCount": 0,
+		"traceId": rid, "rootRequestId": rid,
+		"parentConversationId": conversationID, "conversationId": conversationID,
+		"messageId": "msg-" + rid[len(rid)-8:],
+		"agentName": "mp", "agentType": "main",
+		"codebuddy.session_id":              conversationID,
+		"codebuddy.conversation_request_id": rid,
+	}
+}
+
+// SchoolExpertUseEvents 构造专家召唤+对话事件链（expert_use 判据，三账号实测）。
+// expertID/expertName 为开学季分类专家（16-BackToSchool）。
+func SchoolExpertUseEvents(expertID, expertName, conversationID string) []map[string]any {
+	rid := "wb2api-" + clientToken()
+	return []map[string]any{
+		{
+			"eventCode": "expert_summon_click", "id": expertID, "name": expertID,
+			"expertTitle": expertName, "type": "16-BackToSchool", "position": 0,
+		},
+		{
+			"eventCode": "expert_summoned", "id": expertID, "name": expertID,
+			"expertTitle": expertName,
+		},
+		{
+			"eventCode": "expert_actual_use", "id": expertID, "name": expertID,
+			"expertTitle": expertName, "type": "16-BackToSchool",
+			"characterCount": 14, "expertType": "builtin",
+		},
+		{
+			"eventCode": "chat_request_send",
+			"inputLength": 14, "isPlan": false, "isAutoExecuteTerminal": false,
+			"isAutoModify": false, "codebaseEnable": false, "maxToken": 0,
+			"maxSteps": 500, "temperature": 0, "maxRetries": 0,
+			"mentionContexts": []any{}, "knowledgeId": []any{}, "knowledgeName": []any{},
+			"codebaseId": "", "mentionContextCount": 0, "command": "",
+			"recommendId": "", "skillId": "", "skillCount": 0, "totalCount": 0,
+			"traceId": rid, "rootRequestId": rid,
+			"parentConversationId": conversationID, "conversationId": conversationID,
+			"messageId": "msg-" + rid[len(rid)-8:],
+			"agentName": "mp", "agentType": "main",
+			"expertId": expertID, "expertName": expertName,
+			"codebuddy.session_id":              conversationID,
+			"codebuddy.conversation_request_id": rid,
+		},
+	}
 }
