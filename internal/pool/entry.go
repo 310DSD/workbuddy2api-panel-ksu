@@ -97,6 +97,14 @@ func (e *entry) healthy(now time.Time) bool {
 	return true
 }
 
+// modelExempt 报告账号是否处于"6004 模型级软冷却"豁免形态：
+// 冷却由 6004 触发（softRateModel 非空）、类别为软冷却、且未禁用未熔断。
+// 这是 healthyForModel（chat 选号）与 ServableNow（探活）共享的豁免语义来源
+// （source of truth），保证两条路径对"模型级限额"的判定一致。
+func (e *entry) modelExempt() bool {
+	return e.coolKind == CoolSoft && e.softRateModel != "" && !e.disabled && e.breakerUntil.IsZero()
+}
+
 // healthyForModel 报告账号对指定 model 是否可选（含模型级豁免）：
 // 冷却为由 6004 触发的**模型级**软冷却（softRateModel 非空）且请求模型不同
 // （softRateModel != reqModel）时，跳过冷却判定——该模型限流不代表账号在其他

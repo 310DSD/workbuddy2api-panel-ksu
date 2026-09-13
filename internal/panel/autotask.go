@@ -336,7 +336,7 @@ func runChat5(p *Panel, a *auth.Auth) (string, error) {
 	}
 	for i := int64(0); i < need; i++ {
 		cid := fmt.Sprintf("wb2api-chat5-%d-%d", time.Now().UnixMilli(), i)
-		if err := p.cfg.Upstream.ReportChatActivity(a, cid); err != nil {
+		if err := p.cfg.Upstream.ReportChatActivity(a, cid, ""); err != nil {
 			return fmt.Sprintf("上报第 %d/%d 条失败: %v", i+1, need, err), nil
 		}
 		if i < need-1 {
@@ -348,7 +348,7 @@ func runChat5(p *Panel, a *auth.Auth) (string, error) {
 
 // runFirstBuddy 领养：report（解锁前置）→ agreement → first。
 func runFirstBuddy(p *Panel, a *auth.Auth) (string, error) {
-	if err := p.cfg.Upstream.ReportChatActivity(a, fmt.Sprintf("wb2api-adopt-%d", time.Now().UnixMilli())); err != nil {
+	if err := p.cfg.Upstream.ReportChatActivity(a, fmt.Sprintf("wb2api-adopt-%d", time.Now().UnixMilli()), ""); err != nil {
 		return "", fmt.Errorf("前置上报: %w", err)
 	}
 	time.Sleep(reportGap) // 给上游事件处理留时间（脚本实测口径）
@@ -380,7 +380,7 @@ func runModelChat(p *Panel, a *auth.Auth) (string, error) {
 		},
 		"stream": true,
 	})
-	rc, status, respBody, err := p.cfg.Upstream.ChatStream(a, body)
+	rc, status, respBody, err := p.cfg.Upstream.ChatStream(a, body, "")
 	if err != nil {
 		return "", fmt.Errorf("对话请求: %w", err)
 	}
@@ -393,7 +393,7 @@ func runModelChat(p *Panel, a *auth.Auth) (string, error) {
 	rc.Close()
 	time.Sleep(reportGap)
 	// 3. 对齐模型的上报（触发进度）
-	if err := p.cfg.Upstream.ReportChatActivityModel(a, fmt.Sprintf("wb2api-glm52-%d", time.Now().UnixMilli()), modelID, modelName); err != nil {
+	if err := p.cfg.Upstream.ReportChatActivityModel(a, fmt.Sprintf("wb2api-glm52-%d", time.Now().UnixMilli()), "", modelID, modelName); err != nil {
 		return "对话已完成，但进度上报失败：" + err.Error(), nil
 	}
 	return "已完成 glm-5.2 对话并上报", nil

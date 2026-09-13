@@ -188,6 +188,49 @@ func (p *Pool) AvailableUIDs() []string {
 	return uids
 }
 
+// AvailableUIDsForModel 同 AvailableUIDs，但把健康口径换成 healthyForModel：
+// 在该模型上被 6004 限流的账号不列入，而在**其他模型**被限流的账号照常列入（模型豁免）。
+// 供会话粘性按模型分配与命中校验；model 为空时等价于 AvailableUIDs。
+func (p *Pool) AvailableUIDsForModel(model string) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	uids := make([]string, 0, len(p.byUID))
+	for uid, e := range p.byUID {
+		if !e.healthyForModel(now, model) {
+			continue
+		}
+		if p.inFlightFull(e) {
+			continue
+		}
+		uids = append(uids, uid)
+	}
+	sort.Strings(uids)
+	return uids
+}
+
+// PickByUIDForModel 同 PickByUID，但用 healthyForModel 校验：绑定号在当前模型被
+// 6004 限流时返回 nil，让调用方（handler）解绑并回落普通轮换。
+// 这是粘性能"换得动"的关键：绑定只记 uid，若只按账号级 healthy 校验，
+// 被模型级限额的号（账号整体仍健康）会被持续选中直到轮换次数耗尽。
+func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return nil
+	}
+	now := time.Now()
+	if !e.healthyForModel(now, model) {
+		return nil
+	}
+	if p.inFlightFull(e) {
+		return nil
+	}
+	e.lastUsed = now
+	return e.a
+}
+
 // PickByUID 若 uid 当前 healthy 且未占满在途名额，返回其凭证（记录 lastUsed 防撞号）；
 // 否则返回 nil。供会话粘性路由命中校验与直取使用。
 func (p *Pool) PickByUID(uid string) *auth.Auth {
@@ -243,7 +286,13 @@ func (p *Pool) ServableNow() bool {
 	defer p.mu.RUnlock()
 	now := time.Now()
 	for _, e := range p.byUID {
-		if e.healthy(now) && !p.inFlightFull(e) {
+		if p.inFlightFull(e) {
+			continue
+		}
+		// 存在性语义：账号级 healthy，或处于模型级豁免形态（6004 单模型软冷却——
+		// 对触发模型不可用，对其他模型仍可选）。探活无请求模型上下文，取"存在可服务
+		// 模型"与 chat 实际可达性等价（issue #31 探活侧补齐）。
+		if e.healthy(now) || e.modelExempt() {
 			return true
 		}
 	}

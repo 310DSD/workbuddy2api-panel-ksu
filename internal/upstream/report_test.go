@@ -31,7 +31,7 @@ func TestReportChatActivitySendsArrayWithUserID(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
-	if err := c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u-active"}, "wb2api-123"); err != nil {
+	if err := c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u-active"}, "wb2api-123", ""); err != nil {
 		t.Fatalf("report: %v", err)
 	}
 	if len(got) != 1 {
@@ -62,7 +62,7 @@ func TestReportChatActivityServerError(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
-	err := c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u1"}, "cid")
+	err := c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u1"}, "cid", "")
 	if err == nil {
 		t.Fatal("want error on 500")
 	}

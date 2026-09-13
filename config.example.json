@@ -28,7 +28,13 @@
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,
-    "user_agent": ""
+    "user_agent": "",
+    "client_version": "",
+    "cli_version": "",
+    "client_name": "",
+    "device_token": "",
+    "device_token_file": "",
+    "passthrough_ip": false
   },
   "features": {
     "sanitize_blacklist_fingerprints": true

@@ -288,6 +288,9 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
+	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
+	clientIP := upstream.ExtractClientIP(r)
 	// 请求体上限：LimitReader 读 limit+1 以探测"超限"（读到 limit+1 字节即已超），
 	// 超限直接 413，不把截断的半截 JSON 喂给上游（issue #41：截断 body 让上游
 	// unmarshal 报 unexpected EOF，网关却罚号轮空）。
@@ -322,7 +325,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.Session != nil {
 		sessKey = session.ExtractKey(body)
 		if sessKey != "" {
-			if uid, ok := h.cfg.Session.Resolve(sessKey); ok {
+			// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
+			// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
+			if uid, ok := h.cfg.Session.ResolveForModel(sessKey, peek.Model); ok {
 				stickyUID = uid
 			}
 		}
@@ -373,9 +378,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 选号：粘性号优先（PickByUID 已校验 health + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
-			acct = h.cfg.Pool.PickByUID(stickyUID)
+			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, peek.Model)
 			if acct == nil {
-				// 粘性号当前不可用（冷却/占满）→ 解绑，本次回落普通轮换。
+				// 粘性号当前不可用（冷却/占满/被当前模型限额）→ 解绑，本次回落普通轮换。
 				unbindSticky()
 			}
 		}
@@ -421,7 +426,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body)
+		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
+		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body, clientIP)
 		if terr != nil {
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
 			// 上游 client 已打 transport error 日志。

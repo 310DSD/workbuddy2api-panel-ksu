@@ -27,6 +27,10 @@ type Auth struct {
 	EnterpriseID string
 	Nickname     string
 	FilePath     string // 来源文件；refresh 后原子写回此处
+
+	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件的 device_token 键。
+	// 缺省为空 = 不注入该头（容器内无桌面端 Turing SDK 的常见部署）。
+	DeviceToken string
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -69,6 +73,8 @@ func Parse(raw []byte) (*Auth, error) {
 				EnterpriseID string `json:"enterpriseId"`
 				Nickname     string `json:"nickname"`
 			} `json:"account"`
+			// DeviceToken 顶层 device_token（嵌套形与扁平形共用；手写时无需嵌进 auth 对象）。
+			DeviceToken string `json:"device_token"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -81,6 +87,7 @@ func Parse(raw []byte) (*Auth, error) {
 			UID:          n.Account.UID,
 			EnterpriseID: n.Account.EnterpriseID,
 			Nickname:     n.Account.Nickname,
+			DeviceToken:  n.DeviceToken,
 		}
 	} else {
 		var f struct {
@@ -91,6 +98,7 @@ func Parse(raw []byte) (*Auth, error) {
 			UID          string `json:"uid"`
 			EnterpriseID string `json:"enterpriseId"`
 			Nickname     string `json:"nickname"`
+			DeviceToken  string `json:"device_token"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -103,6 +111,7 @@ func Parse(raw []byte) (*Auth, error) {
 			UID:          f.UID,
 			EnterpriseID: f.EnterpriseID,
 			Nickname:     f.Nickname,
+			DeviceToken:  f.DeviceToken,
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {

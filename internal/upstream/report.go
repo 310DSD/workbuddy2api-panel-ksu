@@ -83,14 +83,18 @@ type chatRequestEvent struct {
 
 // ReportChatActivity 向上游发送一条对话活跃上报（chat_request_send）。
 // conversationID 由调用方生成（如 wb2api-<ms>），无需真实会话——服务端不校验一致性。
+// requestID 为本轮请求独立标识（多轮同会话上报时各条不同）；空时回落 conversationID。
 // 错误语义与 doJSON 一致：HTTP 非 2xx / 业务 code != 0 → *Error。
-func (c *Client) ReportChatActivity(a *auth.Auth, conversationID string) error {
-	return c.ReportChatActivityModel(a, conversationID, "deepseek-v4-flash", "DeepSeek V4 Flash")
+func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID string) error {
+	return c.ReportChatActivityModel(a, conversationID, requestID, "deepseek-v4-flash", "DeepSeek V4 Flash")
 }
 
 // ReportChatActivityModel 同上，但可指定上报携带的模型：供「体验某模型」类任务
-// 对齐实际模型（如 Model_chat_GLM5.2 需 requestModelId=glm-5.2）。
-func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, modelID, modelName string) error {
+// 对齐实际模型（如 Model_chat_GLM5.2 需 requestModelId=glm-5.2 与独立 requestID）。
+func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, requestID, modelID, modelName string) error {
+	if requestID == "" {
+		requestID = conversationID
+	}
 	if modelID == "" {
 		modelID = "deepseek-v4-flash"
 	}
@@ -104,7 +108,7 @@ func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, modelID, 
 		ReportDelay:           0,
 		Mode:                  "craft",
 		ConversationID:        conversationID,
-		RequestID:             conversationID,
+		RequestID:             requestID,
 		InputLength:           12,
 		RequestModelID:        modelID,
 		RequestModelName:      modelName,
@@ -130,7 +134,7 @@ func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, modelID, 
 		FileURI:               "",
 		PresentAt:             now,
 		TraceID:               "",
-		RootRequestID:         conversationID,
+		RootRequestID:         requestID,
 		ParentConversationID:  conversationID,
 		AgentName:             "default",
 		AgentType:             "conversation",

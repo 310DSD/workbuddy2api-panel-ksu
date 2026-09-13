@@ -261,8 +261,13 @@ func (s *Scheduler) RunCheckinNow() {
 			continue
 		}
 		if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
-			log.Printf("checkin %s: %v", st.UID, err)
-			// 已签到等业务错误也继续走余额查询
+			// "今天已签到"是幂等成功（上游对重复签到返回 code!=0），不再当失败打 error 行。
+			if upstream.IsAlreadyCheckin(err) {
+				log.Printf("checkin %s: 今天已签到（幂等）", st.UID)
+			} else {
+				log.Printf("checkin %s: %v", st.UID, err)
+			}
+			// 其余业务错误也继续走余额查询
 		}
 		remain, err := s.cfg.Upstream.UserResource(a)
 		if err != nil {
@@ -295,7 +300,7 @@ func (s *Scheduler) RunActivityNow() {
 		}
 		first = false
 		cid := fmt.Sprintf("wb2api-%d", time.Now().UnixMilli())
-		if err := s.cfg.Upstream.ReportChatActivity(a, cid); err != nil {
+		if err := s.cfg.Upstream.ReportChatActivity(a, cid, ""); err != nil {
 			log.Printf("activity %s: %v", a.UID, err)
 			continue
 		}

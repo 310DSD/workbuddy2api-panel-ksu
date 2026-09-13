@@ -74,12 +74,25 @@ type Config struct {
 		HeaderTimeoutSeconds int `json:"header_timeout_seconds"`
 		// IdleTimeoutSeconds 聊天 SSE 流中空闲上限（活跃吐数据续命不掐）；<=0 回落默认 300。
 		IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
-		// UserAgent 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。
+		// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认三段式）。
 		// 全部出站请求生效：chat/refresh/checkin/balance/report/travel/FetchModels。
-		// issue #42 深挖：官网「使用端」列基于出站请求 UA 的服务端归因，官方 WorkBuddy
-		// 桌面 UA 为 `WorkBuddy/<version>`。指纹净化考虑：默认值保持现状（可配而非改死），
-		// 仅当用户显式配置才改写。
+		// 默认值已对齐官方 WorkBuddy 桌面形态（三段式），用户仍可配完全自定义值改写。
 		UserAgent string `json:"user_agent"`
+		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与归属头
+		// X-IDE-Version）。空 = 内置默认（对齐官方 5.5.4 分发包）。
+		ClientVersion string `json:"client_version"`
+		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（官方内置 CLI 2.137.1）。
+		CliVersion string `json:"cli_version"`
+		// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
+		// 空 = 旧行为 X-Product="SaaS" 不设 X-IDE-*；配 "WorkBuddy" 则四头跟随。
+		ClientName string `json:"client_name"`
+		// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底；空 = 不注入。
+		// 每号 auth 文件的 device_token 键优先于本项。
+		DeviceToken string `json:"device_token"`
+		// DeviceTokenFile device token 文件路径兜底（宿主落盘的桌面端 token，5 分钟读取缓存）。
+		DeviceTokenFile string `json:"device_token_file"`
+		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
+		PassthroughIP bool `json:"passthrough_ip"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -290,6 +303,26 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_USER_AGENT"); v != "" {
 		c.Upstream.UserAgent = v
+	}
+	if v := os.Getenv("WB2A_CLIENT_VERSION"); v != "" {
+		c.Upstream.ClientVersion = v
+	}
+	if v := os.Getenv("WB2A_CLI_VERSION"); v != "" {
+		c.Upstream.CliVersion = v
+	}
+	if v := os.Getenv("WB2A_CLIENT_NAME"); v != "" {
+		c.Upstream.ClientName = v
+	}
+	if v := os.Getenv("WB2A_DEVICE_TOKEN"); v != "" {
+		c.Upstream.DeviceToken = v
+	}
+	if v := os.Getenv("WB2A_DEVICE_TOKEN_FILE"); v != "" {
+		c.Upstream.DeviceTokenFile = v
+	}
+	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.PassthroughIP = b
+		}
 	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
