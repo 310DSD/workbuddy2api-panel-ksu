@@ -631,7 +631,10 @@ async function loadSchoolStatus(quiet) {
       list.innerHTML = ''; return;
     }
     let allDone = 0;
-    list.innerHTML = arr.map(v => {
+    const head = '<div class="shead"><div class="who">账号</div><div class="stasks">' +
+      SCHOOL_META.map(([, name]) => '<span>' + esc(name) + '</span>').join('') +
+      '</div><div class="luck">剩余抽奖</div></div>';
+    list.innerHTML = head + arr.map(v => {
       const by = {};
       (v.tasks || []).forEach(t => by[t.task_code] = t);
       const cells = SCHOOL_META.map(([code]) => {
