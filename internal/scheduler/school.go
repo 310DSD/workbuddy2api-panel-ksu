@@ -37,6 +37,12 @@ func (s *Scheduler) RunSchoolNow() {
 	}
 }
 
+// RunSchoolAccountNow 单账号开学季闭环（面板任务中心逐账号执行用）：
+// 四任务独立处理 + 抽完抽奖次数，与每日排程同语义。
+func (s *Scheduler) RunSchoolAccountNow(a *auth.Auth) {
+	s.schoolAccount(a)
+}
+
 // schoolAccount 单账号闭环：四个任务独立处理（已领/不在期静默跳过），最后抽完次数。
 // 判据（三账号实测 2026-09-13/14，protocol.md §7.11/§8）：
 //   - share_invite（每日 +100c+1抽）：POST share-complete 即点亮。

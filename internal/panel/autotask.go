@@ -144,6 +144,16 @@ func autoActionFor(code string) *autoAction {
 	return nil
 }
 
+// autoActionIndex 任务在 autoActions 中的顺序（队列执行按依赖序排；未知返回大值）。
+func autoActionIndex(code string) int {
+	for i := range autoActions {
+		if autoActions[i].TaskCode == code {
+			return i
+		}
+	}
+	return 1 << 20
+}
+
 // taskByCode 拉取任务列表并定位单个任务；未找到返回 nil（不视为错误）。
 func (p *Panel) taskByCode(a *auth.Auth, code string) (*upstream.Task, error) {
 	tasks, err := p.cfg.Upstream.ListTasks(a)

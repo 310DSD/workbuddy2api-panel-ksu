@@ -70,6 +70,10 @@ type Panel struct {
 	// 不同账号之间不互斥（并行照旧）。TryLock 语义，锁条目常驻（账号数有界）。
 	taskMu    sync.Mutex
 	taskLocks map[string]*sync.Mutex
+
+	// 任务中心执行队列（taskcenter.go）。
+	queueOnce sync.Once
+	q         *queueState
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -139,6 +143,11 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim", p.withAuth(p.accountTaskClaim))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.withAuth(p.accountTaskAuto))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.withAuth(p.accountTaskAutoAll))
+	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
+	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
+	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
+	p.mux.HandleFunc("GET /panel/api/school/status", p.withAuth(p.schoolStatus))
+	p.mux.HandleFunc("POST /panel/api/school/run_all", p.withAuth(p.schoolRunAll))
 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
 	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
 	p.mux.HandleFunc("POST /panel/api/activity_all", p.withAuth(p.activityAll))
@@ -202,9 +211,9 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// logsHandler 返回日志环形缓冲快照（时间升序）。
+// logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"lines": p.logs.Snapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot()})
 }
 
 // models 实时查询上游模型列表与 reasoning 实际档位（直连上游，不读路由层 1h 缓存）：

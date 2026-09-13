@@ -91,7 +91,7 @@ $('btnKey').onclick = async () => {
 $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
-const TITLES = { accounts: '账号池', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -100,6 +100,7 @@ function go(v) {
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
+  if (v === 'taskscenter') { loadSchoolStatus(true); pollQueueOnce(); }
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
 go((location.hash || '#accounts').slice(1) in TITLES ? (location.hash || '#accounts').slice(1) : 'accounts');
@@ -242,17 +243,35 @@ async function loadModels() {
 }
 $('btnModels').onclick = loadModels;
 
-/* ── 日志 ─────────────────────────────────────────────────────────── */
+/* ── 日志（频道：全部/任务/对话/系统） ─────────────────────────────── */
+let logCh = 'all';
+$('logChips').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-ch]');
+  if (!b) return;
+  logCh = b.dataset.ch;
+  document.querySelectorAll('#logChips .chip').forEach(c => c.classList.toggle('on', c === b));
+  loadLogs();
+});
 async function loadLogs() {
   const box = $('logBox');
   const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
   try {
     const d = await api('logs');
-    const lines = d.lines || [];
-    box.innerHTML = lines.length
-      ? lines.map(l => '<span class="ln' + (/error|失败|错误/.test(l) ? ' e' : /warn|冷却|熔断/.test(l) ? ' w' : '') + '">' + esc(l) + '</span>').join('')
+    const entries = (d.entries || []).filter(e => logCh === 'all' || e.ch === logCh);
+    box.innerHTML = entries.length
+      ? entries.map(e => {
+        const lvl = /error|失败|错误/.test(e.text) ? ' e' : /warn|冷却|熔断/.test(e.text) ? ' w' : '';
+        const t = e.ts ? new Date(e.ts).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+        const ch = logCh === 'all' ? '<i class="lch c-' + esc(e.ch) + '">' + ({ task: '任务', chat: '对话', sys: '系统' }[e.ch] || e.ch) + '</i>' : '';
+        return '<span class="ln' + lvl + '">' + ch + esc(t + ' ' + e.text) + '</span>';
+      }).join('')
       : '<span style="color:var(--ink-3)">暂无日志</span>';
     if (logPin && atEnd) box.scrollTop = box.scrollHeight;
+    const counts = {};
+    for (const e of (d.entries || [])) counts[e.ch] = (counts[e.ch] || 0) + 1;
+    $('logNote').textContent = logCh === 'all'
+      ? '任务 ' + (counts.task || 0) + ' · 对话 ' + (counts.chat || 0) + ' · 系统 ' + (counts.sys || 0)
+      : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行';
   } catch (e) { /* 概览已提示 */ }
 }
 $('btnLogPin').onclick = () => {
@@ -408,6 +427,7 @@ $('btnRefresh').onclick = async () => {
 function refreshVisible() {
   if (view === 'accounts') loadOverview(true);
   else if (view === 'logs') loadLogs();
+  else if (view === 'taskscenter') pollQueueOnce();
 }
 function start() {
   loadOverview(true);
@@ -579,3 +599,153 @@ $('taskBody').addEventListener('click', async ev => {
   } catch (e) { toast(e.message, 'err'); }
   finally { loadTasks(); }
 });
+
+/* ── 任务中心：开学季状态 + 全账号扫描/队列 ───────────────────────── */
+const SCHOOL_NAMES = {
+  share_invite: '分享活动', desktop_chat_1_time: '桌面体验',
+  chat_3_times: '对话×3', expert_use: '专家', task_student_verify: '学生认证'
+};
+function schoolCell(t) {
+  if (!t) return '<span style="color:var(--ink-3)">—</span>';
+  const prog = t.target_count ? t.progress + '/' + t.target_count : String(t.progress);
+  if (t.status === 'claimed') return '<span class="tag ok">已领</span>';
+  if (t.status === 'completed') return '<span class="tag warn">可领</span>';
+  if (t.status === 'in_progress') return '<span class="tag mute">' + esc(prog) + '</span>';
+  return '<span class="tag mute">未做</span>';
+}
+async function loadSchoolStatus(quiet) {
+  const st = $('schoolState'), tb = $('schoolTable');
+  if (!quiet) { st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">查询中</span>'; }
+  try {
+    const d = await api('school/status');
+    const list = d.accounts || [];
+    if (!list.length) { st.hidden = false; st.className = 'state'; st.textContent = '暂无可用账号'; tb.hidden = true; return; }
+    $('schoolBody').innerHTML = list.map(v => {
+      const by = {};
+      (v.tasks || []).forEach(t => by[t.task_code] = t);
+      const err = v.error ? '<div class="hint" style="font-size:11.5px;color:var(--bad)">' + esc(v.error) + '</div>' : '';
+      return '<tr><td class="mark" aria-hidden="true"><i></i></td>' +
+        '<td class="who"><div class="nm">' + esc(v.nickname || '未命名') + '</div><div class="id">' + esc(v.uid.slice(0, 16)) + '</div>' + err + '</td>' +
+        '<td>' + schoolCell(by.share_invite) + '</td>' +
+        '<td>' + schoolCell(by.desktop_chat_1_time) + '</td>' +
+        '<td>' + schoolCell(by.chat_3_times) + '</td>' +
+        '<td>' + schoolCell(by.expert_use) + '</td>' +
+        '<td>' + schoolCell(by.task_student_verify) + '</td>' +
+        '<td class="num">' + (v.chances == null ? '—' : v.chances) + '</td></tr>';
+    }).join('');
+    st.hidden = true; tb.hidden = false;
+  } catch (e) {
+    st.hidden = false; st.className = 'state err'; st.textContent = e.message;
+  }
+}
+$('btnSchoolRefresh').onclick = () => loadSchoolStatus(false);
+$('btnSchoolRunAll').onclick = async () => {
+  if (!confirm('将对全部账号执行开学季闭环（分享/桌面/对话/专家 + 抽奖），约 1-2 分钟。确认继续？')) return;
+  try {
+    await api('school/run_all', { method: 'POST' });
+    toast('开学季闭环已开始，结果看任务日志', 'ok');
+    setTimeout(() => loadSchoolStatus(true), 15000);
+  } catch (e) { toast(e.message, 'err'); }
+};
+
+/* 扫描 + 队列 */
+let scanData = null, queueTimer = null;
+$('btnScanAll').onclick = async () => {
+  const b = $('btnScanAll');
+  b.disabled = true; b.textContent = '扫描中…';
+  const st = $('scanState');
+  st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">扫描各账号任务</span>';
+  try {
+    const d = await api('tasks/scan_all', { method: 'POST' });
+    scanData = d;
+    renderScan(d);
+  } catch (e) { st.hidden = false; st.className = 'state err'; st.textContent = e.message; }
+  finally { b.disabled = false; b.textContent = '扫描待办'; }
+};
+function renderScan(d) {
+  const st = $('scanState'), tb = $('scanTable');
+  const rows = [];
+  for (const a of (d.accounts || [])) {
+    for (const t of (a.growth || [])) {
+      rows.push({ uid: a.uid, nick: a.nickname, kind: 'growth', code: t.task_code, title: t.title, prog: (t.target ? t.current + '/' + t.target : '—') });
+    }
+    for (const t of (a.school || [])) {
+      rows.push({ uid: a.uid, nick: a.nickname, kind: 'school', code: t.task_code, title: SCHOOL_NAMES[t.task_code] || t.task_code, prog: (t.target_count ? t.progress + '/' + t.target_count : '—') });
+    }
+  }
+  if (!rows.length) {
+    st.hidden = false; st.className = 'state'; st.textContent = '全部账号没有待办任务 🎉';
+    tb.hidden = true; return;
+  }
+  st.hidden = true; tb.hidden = false;
+  $('scanBody').innerHTML = rows.map(r => '<tr><td class="mark" aria-hidden="true"><i></i></td>' +
+    '<td class="who"><div class="nm">' + esc(r.nick || '未命名') + '</div><div class="id">' + esc(r.uid.slice(0, 16)) + '</div></td>' +
+    '<td><span class="tag ' + (r.kind === 'school' ? 'warn' : 'ok') + '">' + (r.kind === 'school' ? '开学季' : '成长') + '</span></td>' +
+    '<td class="who"><div class="nm">' + esc(r.title || r.code) + '</div><div class="id">' + esc(r.code) + '</div></td>' +
+    '<td class="num">' + esc(r.prog) + '</td>' +
+    '<td class="qcell" data-u="' + esc(r.uid) + '" data-c="' + esc(r.kind === 'school' ? 'school_daily' : r.code) + '">—</td>' +
+    '<td class="qmsg" data-m="' + esc(r.uid) + '|' + esc(r.kind === 'school' ? 'school_daily' : r.code) + '">—</td></tr>').join('');
+}
+$('btnRunQueue').onclick = async () => {
+  const conc = Number($('qcConc').value) || 1;
+  if (!confirm('将扫描全部账号待办并排队执行（账号并发 ' + conc + '，账号内串行）。\n含真实对话的任务耗时较长，确认继续？')) return;
+  const b = $('btnRunQueue');
+  b.disabled = true; b.textContent = '启动中…';
+  try {
+    const r = await api('tasks/run_queue', { method: 'POST', body: JSON.stringify({ concurrency: conc }) });
+    if (!r.started) { toast(r.message || '没有待办任务', 'ok'); return; }
+    toast('队列已启动：' + r.total + ' 项（并发 ' + conc + '）', 'ok');
+    startQueuePolling();
+  } catch (e) { toast(e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = '执行全部待办'; }
+};
+function queueRowStatus(it) {
+  if (it.status === 'done') return '<span class="tag ok">完成</span>';
+  if (it.status === 'error') return '<span class="tag bad">失败</span>';
+  if (it.status === 'running') return '<span class="tag warn">执行中</span>';
+  if (it.status === 'skipped') return '<span class="tag mute">跳过</span>';
+  return '<span class="tag mute">排队</span>';
+}
+async function pollQueueOnce() {
+  try {
+    const q = await api('tasks/queue');
+    if (!q.started) return;
+    // 若还没有渲染表格（直接点执行没先扫描），先按队列渲染。
+    if ($('scanTable').hidden && q.items && q.items.length) {
+      renderScan({ accounts: groupQueueToScan(q.items) });
+    }
+    let done = 0;
+    for (const it of (q.items || [])) {
+      done += (it.status === 'done' || it.status === 'error' || it.status === 'skipped') ? 1 : 0;
+      const cell = document.querySelector('.qcell[data-u="' + CSS.escape(it.uid) + '"][data-c="' + CSS.escape(it.code) + '"]');
+      if (cell) cell.innerHTML = queueRowStatus(it);
+      const msg = document.querySelector('.qmsg[data-m="' + CSS.escape(it.uid) + '|' + CSS.escape(it.code) + '"]');
+      if (msg && it.message) msg.textContent = it.message;
+    }
+    const total = q.items ? q.items.length : 0;
+    $('scanState').hidden = total === 0;
+    if (total) {
+      $('scanState').className = 'state';
+      $('scanState').textContent = (q.running ? '执行中 ' : '已结束 ') + done + ' / ' + total + (q.conc > 1 ? '（并发 ' + q.conc + '）' : '');
+    }
+  } catch (e) { /* 静默：任务中心不可见时不打扰 */ }
+}
+function groupQueueToScan(items) {
+  const byUid = {};
+  for (const it of items) {
+    if (!byUid[it.uid]) byUid[it.uid] = { uid: it.uid, nickname: it.nickname, growth: [], school: [] };
+    const arr = it.kind === 'school' ? byUid[it.uid].school : byUid[it.uid].growth;
+    arr.push({ task_code: it.code, title: it.kind === 'school' ? (SCHOOL_NAMES[it.code] || '开学季闭环') : it.code, current: 0, target: 0 });
+  }
+  return Object.values(byUid);
+}
+function startQueuePolling() {
+  if (queueTimer) clearInterval(queueTimer);
+  queueTimer = setInterval(async () => {
+    await pollQueueOnce();
+    try {
+      const q = await api('tasks/queue');
+      if (!q.running) { clearInterval(queueTimer); queueTimer = null; toast('任务队列执行结束', 'ok'); loadSchoolStatus(true); }
+    } catch (e) { /* 忽略 */ }
+  }, 3000);
+}
