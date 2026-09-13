@@ -600,44 +600,64 @@ $('taskBody').addEventListener('click', async ev => {
   finally { loadTasks(); }
 });
 
-/* ── 任务中心：开学季状态 + 全账号扫描/队列 ───────────────────────── */
-const SCHOOL_NAMES = {
-  share_invite: '分享活动', desktop_chat_1_time: '桌面体验',
-  chat_3_times: '对话×3', expert_use: '专家', task_student_verify: '学生认证'
-};
-function schoolCell(t) {
-  if (!t) return '<span style="color:var(--ink-3)">—</span>';
-  const prog = t.target_count ? t.progress + '/' + t.target_count : String(t.progress);
-  if (t.status === 'claimed') return '<span class="tag ok">已领</span>';
-  if (t.status === 'completed') return '<span class="tag warn">可领</span>';
-  if (t.status === 'in_progress') return '<span class="tag mute">' + esc(prog) + '</span>';
-  return '<span class="tag mute">未做</span>';
+/* ── 任务中心：开学季 + 全账号扫描/队列 ──────────────────────────── */
+const SCHOOL_META = [
+  ['share_invite', '分享'],
+  ['desktop_chat_1_time', '桌面'],
+  ['chat_3_times', '对话×3'],
+  ['expert_use', '专家'],
+  ['task_student_verify', '认证'],
+];
+// 开学季任务单元：✓ 已领（绿）｜◐ x/y 进行中（琥珀）｜○ 未做（灰）
+function staskHTML(t) {
+  if (!t) return '<span class="stask todo"><span class="mark">·</span>—</span>';
+  if (t.status === 'claimed') return '<span class="stask ok"><span class="mark">✓</span>已领</span>';
+  if (t.status === 'completed') return '<span class="stask warn"><span class="mark">◆</span>可领</span>';
+  if (t.status === 'in_progress') {
+    const fr = t.target_count ? '<span class="fr">' + t.progress + '/' + t.target_count + '</span>' : '';
+    return '<span class="stask warn"><span class="mark">◐</span>' + fr + '</span>';
+  }
+  return '<span class="stask todo"><span class="mark">○</span>未做</span>';
 }
+const LUCK_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3.2 5.2 5 1.8l3 2.4 3-2.4 1.8 3.4-1.4 2.6 1.4 2.6-3.4 2.2H6l-3.4-2.2 1.4-2.6z" opacity=".9"/><circle cx="8" cy="9" r="1.1" fill="currentColor" stroke="none"/></svg>';
 async function loadSchoolStatus(quiet) {
-  const st = $('schoolState'), tb = $('schoolTable');
-  if (!quiet) { st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">查询中</span>'; }
+  const st = $('schoolState'), list = $('schoolList');
+  if (!quiet) { st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">查询中</span>'; list.innerHTML = ''; }
   try {
     const d = await api('school/status');
-    const list = d.accounts || [];
-    if (!list.length) { st.hidden = false; st.className = 'state'; st.textContent = '暂无可用账号'; tb.hidden = true; return; }
-    $('schoolBody').innerHTML = list.map(v => {
+    const arr = d.accounts || [];
+    if (!arr.length) {
+      st.hidden = false; st.className = 'state'; st.textContent = '暂无可用账号';
+      list.innerHTML = ''; return;
+    }
+    let allDone = 0;
+    list.innerHTML = arr.map(v => {
       const by = {};
       (v.tasks || []).forEach(t => by[t.task_code] = t);
-      const err = v.error ? '<div class="hint" style="font-size:11.5px;color:var(--bad)">' + esc(v.error) + '</div>' : '';
-      return '<tr><td class="mark" aria-hidden="true"><i></i></td>' +
-        '<td class="who"><div class="nm">' + esc(v.nickname || '未命名') + '</div><div class="id">' + esc(v.uid.slice(0, 16)) + '</div>' + err + '</td>' +
-        '<td>' + schoolCell(by.share_invite) + '</td>' +
-        '<td>' + schoolCell(by.desktop_chat_1_time) + '</td>' +
-        '<td>' + schoolCell(by.chat_3_times) + '</td>' +
-        '<td>' + schoolCell(by.expert_use) + '</td>' +
-        '<td>' + schoolCell(by.task_student_verify) + '</td>' +
-        '<td class="num">' + (v.chances == null ? '—' : v.chances) + '</td></tr>';
+      const cells = SCHOOL_META.map(([code]) => {
+        const t = by[code];
+        return '<span title="' + esc(SCHOOL_TITLES[code] || code) + '">' + staskHTML(t) + '</span>';
+      }).join('');
+      const done = SCHOOL_META.filter(([code]) => code !== 'task_student_verify' && by[code] && by[code].status === 'claimed').length;
+      allDone += done === 4 ? 1 : 0;
+      return '<div class="srow">' +
+        '<div class="who"><div class="nm" title="' + esc(v.nickname || '') + '">' + esc(v.nickname || '未命名') + '</div><div class="id">' + esc(v.uid) + '</div></div>' +
+        '<div class="stasks">' + cells + '</div>' +
+        '<div class="luck" title="剩余抽奖次数">' + LUCK_SVG + (v.chances == null ? '—' : v.chances) + '</div>' +
+        (v.error ? '<div class="err">' + esc(v.error) + '</div>' : '') +
+        '</div>';
     }).join('');
-    st.hidden = true; tb.hidden = false;
+    $('schoolSummary').textContent = allDone === arr.length ? '今日全部完成 🎉' : allDone + '/' + arr.length + ' 个账号今日全部完成';
+    st.hidden = true;
   } catch (e) {
     st.hidden = false; st.className = 'state err'; st.textContent = e.message;
   }
 }
+const SCHOOL_TITLES = {
+  share_invite: '分享活动 +100c', desktop_chat_1_time: '桌面端体验 +100c（单次）',
+  chat_3_times: '和 AI 对话 3 次 +50c', expert_use: '召唤开学季专家 +50c',
+  task_student_verify: '学生认证 +100c（需真实认证，不做）',
+};
 $('btnSchoolRefresh').onclick = () => loadSchoolStatus(false);
 $('btnSchoolRunAll').onclick = async () => {
   if (!confirm('将对全部账号执行开学季闭环（分享/桌面/对话/专家 + 抽奖），约 1-2 分钟。确认继续？')) return;
@@ -648,47 +668,21 @@ $('btnSchoolRunAll').onclick = async () => {
   } catch (e) { toast(e.message, 'err'); }
 };
 
-/* 扫描 + 队列 */
-let scanData = null, queueTimer = null;
+/* 成长任务队列 */
+let queueTimer = null;
+const GROWTH_TITLES = {}; // code → 展示名（扫描时从任务列表带出）
 $('btnScanAll').onclick = async () => {
   const b = $('btnScanAll');
   b.disabled = true; b.textContent = '扫描中…';
-  const st = $('scanState');
-  st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">扫描各账号任务</span>';
   try {
-    const d = await api('tasks/scan_all', { method: 'POST' });
-    scanData = d;
-    renderScan(d);
-  } catch (e) { st.hidden = false; st.className = 'state err'; st.textContent = e.message; }
+    const d = await api('tasks/scan_all');
+    renderQueue(groupItems(d), null, '没有待办任务 🎉', '全部账号的成长任务与开学季活动都已完成，明日再来。');
+  } catch (e) { toast(e.message, 'err'); }
   finally { b.disabled = false; b.textContent = '扫描待办'; }
 };
-function renderScan(d) {
-  const st = $('scanState'), tb = $('scanTable');
-  const rows = [];
-  for (const a of (d.accounts || [])) {
-    for (const t of (a.growth || [])) {
-      rows.push({ uid: a.uid, nick: a.nickname, kind: 'growth', code: t.task_code, title: t.title, prog: (t.target ? t.current + '/' + t.target : '—') });
-    }
-    for (const t of (a.school || [])) {
-      rows.push({ uid: a.uid, nick: a.nickname, kind: 'school', code: t.task_code, title: SCHOOL_NAMES[t.task_code] || t.task_code, prog: (t.target_count ? t.progress + '/' + t.target_count : '—') });
-    }
-  }
-  if (!rows.length) {
-    st.hidden = false; st.className = 'state'; st.textContent = '全部账号没有待办任务 🎉';
-    tb.hidden = true; return;
-  }
-  st.hidden = true; tb.hidden = false;
-  $('scanBody').innerHTML = rows.map(r => '<tr><td class="mark" aria-hidden="true"><i></i></td>' +
-    '<td class="who"><div class="nm">' + esc(r.nick || '未命名') + '</div><div class="id">' + esc(r.uid.slice(0, 16)) + '</div></td>' +
-    '<td><span class="tag ' + (r.kind === 'school' ? 'warn' : 'ok') + '">' + (r.kind === 'school' ? '开学季' : '成长') + '</span></td>' +
-    '<td class="who"><div class="nm">' + esc(r.title || r.code) + '</div><div class="id">' + esc(r.code) + '</div></td>' +
-    '<td class="num">' + esc(r.prog) + '</td>' +
-    '<td class="qcell" data-u="' + esc(r.uid) + '" data-c="' + esc(r.kind === 'school' ? 'school_daily' : r.code) + '">—</td>' +
-    '<td class="qmsg" data-m="' + esc(r.uid) + '|' + esc(r.kind === 'school' ? 'school_daily' : r.code) + '">—</td></tr>').join('');
-}
 $('btnRunQueue').onclick = async () => {
   const conc = Number($('qcConc').value) || 1;
-  if (!confirm('将扫描全部账号待办并排队执行（账号并发 ' + conc + '，账号内串行）。\n含真实对话的任务耗时较长，确认继续？')) return;
+  if (!confirm('扫描全部账号待办并排队执行（账号并发 ' + conc + '，账号内串行）。\n含真实对话的任务耗时较长，确认继续？')) return;
   const b = $('btnRunQueue');
   b.disabled = true; b.textContent = '启动中…';
   try {
@@ -699,45 +693,84 @@ $('btnRunQueue').onclick = async () => {
   } catch (e) { toast(e.message, 'err'); }
   finally { b.disabled = false; b.textContent = '执行全部待办'; }
 };
-function queueRowStatus(it) {
-  if (it.status === 'done') return '<span class="tag ok">完成</span>';
-  if (it.status === 'error') return '<span class="tag bad">失败</span>';
-  if (it.status === 'running') return '<span class="tag warn">执行中</span>';
-  if (it.status === 'skipped') return '<span class="tag mute">跳过</span>';
-  return '<span class="tag mute">排队</span>';
+// 扫描结果 → 分组条目（无执行状态）
+function groupItems(d) {
+  const groups = [];
+  for (const a of (d.accounts || [])) {
+    const rows = [];
+    for (const t of (a.growth || [])) {
+      GROWTH_TITLES[t.task_code] = t.title || t.task_code;
+      rows.push({ kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: 'scan' });
+    }
+    for (const t of (a.school || [])) {
+      rows.push({ kind: 'school', code: t.task_code, prog: t.target_count ? t.progress + '/' + t.target_count : '—', status: 'scan' });
+    }
+    if (rows.length) groups.push({ uid: a.uid, nick: a.nickname, rows });
+  }
+  return groups;
+}
+const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行' };
+function qrowHTML(it) {
+  const isSchool = it.kind === 'school';
+  const title = isSchool ? '开学季闭环' : (GROWTH_TITLES[it.code] || it.code);
+  const dotCls = it.status === 'scan' ? 'wait' : it.status === 'running' ? 'run' : it.status === 'error' ? 'err' : it.status === 'skipped' ? 'skip' : it.status === 'done' ? 'done' : 'wait';
+  const stWord = it.status === 'scan' ? '待执行' : (ST_WORDS[it.status] || it.status);
+  return '<div class="qrow" title="' + esc(it.message || '') + '">' +
+    '<span class="code">' + esc(it.code) + '</span>' +
+    '<span class="name"><span class="t">' + esc(title) + '</span>' + (isSchool ? '<span class="tag mute">开学季</span>' : '') + '</span>' +
+    '<span class="prog">' + esc(it.prog || '') + '</span>' +
+    '<span class="st"><span class="qdot ' + dotCls + '"></span>' + stWord + '</span>' +
+    '<span class="msg">' + esc(it.message || '') + '</span>' +
+    '</div>';
+}
+function renderQueue(groups, progress, emptyTitle, emptyDesc) {
+  const empty = $('tcEmpty'), list = $('qcList');
+  if (!groups.length) {
+    empty.style.display = '';
+    if (emptyTitle) empty.querySelector('.t').textContent = emptyTitle;
+    if (emptyDesc) empty.querySelector('.d').textContent = emptyDesc;
+    list.innerHTML = '';
+    $('qProg').hidden = true; $('qcSummary').textContent = '';
+    return;
+  }
+  empty.style.display = 'none';
+  empty.style.display = 'none';
+  let total = 0;
+  list.innerHTML = groups.map(g => {
+    total += g.rows.length;
+    return '<div class="qgroup"><header><span class="nm">' + esc(g.nick || g.uid.slice(0, 12)) + '</span><span class="cnt">' + g.rows.length + ' 项待办</span></header>' +
+      g.rows.map(qrowHTML).join('') + '</div>';
+  }).join('');
+  $('qcSummary').textContent = total + ' 项';
+  updateProgress(progress);
+}
+function updateProgress(q) {
+  if (!q || !q.items) { $('qProg').hidden = true; return; }
+  const total = q.items.length;
+  const done = q.items.filter(it => it.status === 'done' || it.status === 'error' || it.status === 'skipped').length;
+  $('qProg').hidden = false;
+  $('qBarFill').style.width = (total ? Math.round(done / total * 100) : 0) + '%';
+  $('qProgText').textContent = (q.running ? '执行中 ' : '已结束 ') + done + ' / ' + total;
+}
+// 队列状态 → 分组（执行时轮询）
+function groupsFromQueue(items) {
+  const by = new Map();
+  for (const it of items) {
+    if (!by.has(it.uid)) by.set(it.uid, { uid: it.uid, nick: it.nickname, rows: [] });
+    by.get(it.uid).rows.push({
+      kind: it.kind, code: it.code,
+      prog: it.kind === 'school' ? '—' : '',
+      status: it.status, message: it.message,
+    });
+  }
+  return Array.from(by.values());
 }
 async function pollQueueOnce() {
   try {
     const q = await api('tasks/queue');
     if (!q.started) return;
-    // 若还没有渲染表格（直接点执行没先扫描），先按队列渲染。
-    if ($('scanTable').hidden && q.items && q.items.length) {
-      renderScan({ accounts: groupQueueToScan(q.items) });
-    }
-    let done = 0;
-    for (const it of (q.items || [])) {
-      done += (it.status === 'done' || it.status === 'error' || it.status === 'skipped') ? 1 : 0;
-      const cell = document.querySelector('.qcell[data-u="' + CSS.escape(it.uid) + '"][data-c="' + CSS.escape(it.code) + '"]');
-      if (cell) cell.innerHTML = queueRowStatus(it);
-      const msg = document.querySelector('.qmsg[data-m="' + CSS.escape(it.uid) + '|' + CSS.escape(it.code) + '"]');
-      if (msg && it.message) msg.textContent = it.message;
-    }
-    const total = q.items ? q.items.length : 0;
-    $('scanState').hidden = total === 0;
-    if (total) {
-      $('scanState').className = 'state';
-      $('scanState').textContent = (q.running ? '执行中 ' : '已结束 ') + done + ' / ' + total + (q.conc > 1 ? '（并发 ' + q.conc + '）' : '');
-    }
-  } catch (e) { /* 静默：任务中心不可见时不打扰 */ }
-}
-function groupQueueToScan(items) {
-  const byUid = {};
-  for (const it of items) {
-    if (!byUid[it.uid]) byUid[it.uid] = { uid: it.uid, nickname: it.nickname, growth: [], school: [] };
-    const arr = it.kind === 'school' ? byUid[it.uid].school : byUid[it.uid].growth;
-    arr.push({ task_code: it.code, title: it.kind === 'school' ? (SCHOOL_NAMES[it.code] || '开学季闭环') : it.code, current: 0, target: 0 });
-  }
-  return Object.values(byUid);
+    renderQueue(groupsFromQueue(q.items || []), q);
+  } catch (e) { /* 静默 */ }
 }
 function startQueuePolling() {
   if (queueTimer) clearInterval(queueTimer);
@@ -745,7 +778,11 @@ function startQueuePolling() {
     await pollQueueOnce();
     try {
       const q = await api('tasks/queue');
-      if (!q.running) { clearInterval(queueTimer); queueTimer = null; toast('任务队列执行结束', 'ok'); loadSchoolStatus(true); }
+      if (!q.running) {
+        clearInterval(queueTimer); queueTimer = null;
+        toast('任务队列执行结束', 'ok');
+        loadSchoolStatus(true);
+      }
     } catch (e) { /* 忽略 */ }
   }, 3000);
 }
