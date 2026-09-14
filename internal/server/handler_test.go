@@ -105,7 +105,7 @@ func testPoolWith(auths ...*auth.Auth) *pool.Pool {
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	for _, a := range auths {
 		p.Add(a)
-		p.SetCredits(a.UID, 1000)
+		p.SetCredits(a.UID, 1000, 0)
 	}
 	return p
 }
@@ -209,8 +209,8 @@ func TestChatBadParamsRotatesWithoutPenalty(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	p.SetCredits("bad", 2000) // 确定性源 r=0 → 先选 bad
-	p.SetCredits("good", 1000)
+	p.SetCredits("bad", 2000, 0) // 确定性源 r=0 → 先选 bad
+	p.SetCredits("good", 1000, 0)
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
@@ -314,8 +314,8 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
 	// 让 bad 积分更高被先选中
-	p.SetCredits("bad", 2000)
-	p.SetCredits("good", 1000)
+	p.SetCredits("bad", 2000, 0)
+	p.SetCredits("good", 1000, 0)
 	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
 	rec := httptest.NewRecorder()
@@ -350,8 +350,8 @@ func TestChatSoftCoolsOnRateLimitBody(t *testing.T) {
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
 	// 让 bad 积分更高被先选中（与 TestChatRotatesOnHardCredit 同一确定性手法）。
-	p.SetCredits("bad", 2000)
-	p.SetCredits("good", 1000)
+	p.SetCredits("bad", 2000, 0)
+	p.SetCredits("good", 1000, 0)
 	const soft = 45 * time.Second
 	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: soft})
 
@@ -458,8 +458,8 @@ func TestNewHandlerSoftCooldownDefault(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	p.SetCredits("bad", 2000)
-	p.SetCredits("good", 1000)
+	p.SetCredits("bad", 2000, 0)
+	p.SetCredits("good", 1000, 0)
 	h := NewHandler(Config{Pool: p, Upstream: up}) // 不注入 SoftCooldown
 
 	rec := httptest.NewRecorder()
@@ -591,8 +591,8 @@ func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	p.SetCredits("bad", 2000) // bad 积分高，确定性源 → 先被选中
-	p.SetCredits("good", 1000)
+	p.SetCredits("bad", 2000, 0) // bad 积分高，确定性源 → 先被选中
+	p.SetCredits("good", 1000, 0)
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
 	rec := httptest.NewRecorder()
@@ -641,8 +641,8 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	p.SetCredits("bad", 2000)
-	p.SetCredits("good", 1000)
+	p.SetCredits("bad", 2000, 0)
+	p.SetCredits("good", 1000, 0)
 	// 隔离对 breaker 的干扰：熔断阈值默认 3，一次失败不触发。
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
@@ -689,8 +689,8 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	p.SetCredits("bad", 2000)
-	p.SetCredits("good", 1000)
+	p.SetCredits("bad", 2000, 0)
+	p.SetCredits("good", 1000, 0)
 	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
@@ -1041,7 +1041,7 @@ func TestAPIKeyAuth(t *testing.T) {
 
 func TestStatusEndpoint(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
-	p.SetCredits("u1", 42)
+	p.SetCredits("u1", 42, 0)
 	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
 	req := httptest.NewRequest("GET", "/status", nil)
 	rec := httptest.NewRecorder()

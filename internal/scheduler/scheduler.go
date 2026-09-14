@@ -269,12 +269,12 @@ func (s *Scheduler) RunCheckinNow() {
 			}
 			// 其余业务错误也继续走余额查询
 		}
-		remain, err := s.cfg.Upstream.UserResource(a)
+		remain, total, err := s.cfg.Upstream.UserResource(a)
 		if err != nil {
 			log.Printf("user-resource %s: %v", st.UID, err)
 			continue
 		}
-		s.cfg.Pool.ReenableIfCredits(st.UID, remain)
+		s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
 	}
 	s.RunStreakBonusNow()
 	s.RunSchoolNow() // 开学季活动（活动期 9/13-9/24，结束自动跳过）
@@ -376,12 +376,12 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		wg.Add(1)
 		go func(a *auth.Auth, uid string) {
 			defer wg.Done()
-			remain, err := s.cfg.Upstream.UserResource(a)
+			remain, total, err := s.cfg.Upstream.UserResource(a)
 			if err != nil {
 				log.Printf("balance %s: %v", uid, err)
 				return
 			}
-			s.cfg.Pool.ReenableIfCredits(uid, remain)
+			s.cfg.Pool.ReenableIfCredits(uid, remain, total)
 		}(a, st.UID)
 	}
 	wg.Wait()

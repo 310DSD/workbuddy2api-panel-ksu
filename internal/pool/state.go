@@ -102,14 +102,15 @@ func (p *Pool) Revive(uid string) bool {
 // softStreak 属**冷却域**（与 until/coolKind 同域），故随冷却一并清零——与"解冻只清冷却
 // 不清熔断"的既有 C5 语义一致；硬冷却（CoolHard）本就不参与 streak，这里清的是历史软冷却累积。
 // 调用方必须已持有 p.mu。
-func (p *Pool) ReenableIfCredits(uid string, remain int64) {
+func (p *Pool) ReenableIfCredits(uid string, remain, total int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		if remain > 0 && !e.disabled {
-			p.reviveCoolingLocked(e, remain)
+			p.reviveCoolingLocked(e, remain, total)
 		} else {
 			e.credits = remain
+			e.creditsTotal = total
 		}
 		p.dirty.Store(true)
 	}
@@ -320,6 +321,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		UID:             uid,
 		Nickname:        e.a.Nickname,
 		Credits:         e.credits,
+		CreditsTotal:    e.creditsTotal,
 		Cooling:         now.Before(e.until) || now.Before(e.breakerUntil),
 		Reason:          e.reason,
 		Disabled:        e.disabled,

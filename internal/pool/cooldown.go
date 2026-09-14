@@ -6,11 +6,12 @@ import (
 	"time"
 )
 
-func (p *Pool) SetCredits(uid string, credits int64) {
+func (p *Pool) SetCredits(uid string, credits, total int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.credits = credits
+		e.creditsTotal = total
 		p.dirty.Store(true)
 	}
 }
@@ -166,8 +167,9 @@ func nextDay4AM(now time.Time) time.Time {
 }
 
 // Disable 永久禁用（session 死亡），需人工重登后手工恢复或文件替换。
-func (p *Pool) reviveCoolingLocked(e *entry, credits int64) {
+func (p *Pool) reviveCoolingLocked(e *entry, credits, total int64) {
 	e.credits = credits
+	e.creditsTotal = total
 	e.until = time.Time{}
 	e.coolKind = 0
 	e.reason = ""

@@ -585,8 +585,10 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	return out, nil
 }
 
-// UserResource 查询账号当前可花费积分余额（所有套餐 CycleCapacity 聚合，负值钳 0）。
-func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
+// UserResource 查询账号积分余额与总额度（所有套餐聚合）。remain 负值钳 0；
+// total 取与 remain 同源的额度字段（CycleCapacitySize 优先，无周期额度退
+// CapacitySize），上游缺 size 的套餐按 remain 兜底，保证百分比不超 100%。
+func (c *Client) UserResource(a *auth.Auth) (remain, total int64, err error) {
 	now := time.Now()
 	body := map[string]any{
 		"PageNumber":               1,
@@ -598,7 +600,7 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 	}
 	data, err := c.billingJSON(a, http.MethodPost, billingMeterPath, body)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	var resp struct {
 		Response struct {
@@ -616,24 +618,28 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 		} `json:"Response"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("resource parse: %w", err)
+		return 0, 0, fmt.Errorf("resource parse: %w", err)
 	}
 	for _, acct := range resp.Response.Data.Accounts {
-		var r int64
+		var r, size int64
 		switch {
 		case acct.CycleCapacitySize > 0:
-			r = acct.CycleCapacityRemain
+			r, size = acct.CycleCapacityRemain, acct.CycleCapacitySize
 		case acct.CycleCapacityRemain > 0 || acct.CycleCapacityUsed > 0:
-			r = acct.CycleCapacityRemain
+			r, size = acct.CycleCapacityRemain, acct.CycleCapacitySize
 		default:
-			r = acct.CapacityRemain
+			r, size = acct.CapacityRemain, acct.CapacitySize
 		}
 		if r < 0 {
 			r = 0
 		}
+		if size < r {
+			size = r
+		}
 		remain += r
+		total += size
 	}
-	return remain, nil
+	return remain, total, nil
 }
 
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。

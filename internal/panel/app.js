@@ -112,6 +112,7 @@ function renderAccounts(list) {
     tb.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
     return;
   }
+  // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
   const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
   tb.innerHTML = list.map(s => {
     const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
@@ -125,13 +126,17 @@ function renderAccounts(list) {
     } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
     const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
-    const cred = s.credits == null ? '—' : s.credits;
+    const cred = s.credits == null ? '—' : (s.credits_total > 0 ? s.credits + '<span class="of">/' + s.credits_total + '</span>' : String(s.credits));
+    const pct = s.credits_total > 0
+      ? Math.min(100, Math.round((s.credits || 0) / s.credits_total * 100))
+      : Math.round((s.credits || 0) / maxCred * 100);
+    const credTip = s.credits_total > 0 ? '剩余 ' + s.credits + ' / 总额 ' + s.credits_total + '（' + pct + '%）' : '积分（相对池内最高）';
     const frozen = s.disabled || cool > 0;
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + '</div><div class="id">' + esc(short) + '</div></td>' +
       '<td>' + tag + note + '</td>' +
-      '<td class="cred"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + Math.round((s.credits || 0) / maxCred * 100) + '%"></i></div></td>' +
+      '<td class="cred" title="' + credTip + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +
       '<td class="num" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
@@ -154,7 +159,9 @@ async function loadOverview(quiet) {
     $('sHealthy').textContent = d.healthy;
     $('sCooling').textContent = d.cooling;
     $('sDisabled').textContent = d.disabled;
-    $('sCredits').textContent = (d.accounts || []).reduce((a, s) => a + (s.credits || 0), 0);
+    const remSum = (d.accounts || []).reduce((a, s) => a + (s.credits || 0), 0);
+  const totSum = (d.accounts || []).reduce((a, s) => a + (s.credits_total || 0), 0);
+  $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum;
     $('sSticky').textContent = d.sticky_sessions;
     $('navSub').textContent = 'v' + d.version;
     $('navVer').textContent = 'v' + d.version;
@@ -179,10 +186,10 @@ $('accBody').addEventListener('click', async ev => {
   try {
     if (a === 'checkin') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/checkin', { method: 'POST' });
-      toast('签到完成' + (r.credits != null ? '，积分 ' + r.credits : '') + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok');
+      toast('签到完成' + (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok');
     } else if (a === 'balance') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/balance', { method: 'POST' });
-      toast('余额已更新：' + r.credits, 'ok');
+      toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok');
     } else if (a === 'revive') {
       await api('accounts/' + encodeURIComponent(u) + '/revive', { method: 'POST' });
       toast('已解冻', 'ok');
@@ -393,7 +400,7 @@ async function pollLogin() {
       stopPoll();
       $('addReady').hidden = true;
       $('addDone').hidden = false;
-      $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + (r.credits >= 0 ? ' · 积分 ' + r.credits : '') + '，账号已载入池中';
+      $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + (r.credits >= 0 ? ' · 积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + '，账号已载入池中';
       setTimeout(() => { closeAdd(); loadOverview(true); }, 1600);
     }
   } catch (e) {

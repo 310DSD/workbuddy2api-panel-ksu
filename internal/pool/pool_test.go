@@ -32,9 +32,9 @@ func TestPickHighestCredits(t *testing.T) {
 	p.Add(a1)
 	p.Add(a2)
 	p.Add(a3)
-	p.SetCredits("u1", 100)
-	p.SetCredits("u2", 50000)
-	p.SetCredits("u3", 300)
+	p.SetCredits("u1", 100, 0)
+	p.SetCredits("u2", 50000, 0)
+	p.SetCredits("u3", 300, 0)
 	counts := map[string]int{}
 	for i := 0; i < 3000; i++ {
 		counts[p.Pick().UID]++
@@ -50,8 +50,8 @@ func TestPickSkipsCooling(t *testing.T) {
 	a2 := &auth.Auth{UID: "u2"}
 	p.Add(a1)
 	p.Add(a2)
-	p.SetCredits("u1", 100)
-	p.SetCredits("u2", 50)
+	p.SetCredits("u1", 100, 0)
+	p.SetCredits("u2", 50, 0)
 	p.Cooldown("u1", CoolHard, time.Hour, "test")
 	got := p.Pick()
 	if got == nil || got.UID != "u2" {
@@ -63,7 +63,7 @@ func TestPickExpiredCooldownReturnsToHealthy(t *testing.T) {
 	p := New("")
 	a1 := &auth.Auth{UID: "u1"}
 	p.Add(a1)
-	p.SetCredits("u1", 100)
+	p.SetCredits("u1", 100, 0)
 	p.Cooldown("u1", CoolSoft, time.Millisecond, "429")
 	time.Sleep(5 * time.Millisecond)
 	got := p.Pick()
@@ -86,8 +86,8 @@ func TestPickExcluding(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Add(&auth.Auth{UID: "u2"})
-	p.SetCredits("u1", 100)
-	p.SetCredits("u2", 50)
+	p.SetCredits("u1", 100, 0)
+	p.SetCredits("u2", 50, 0)
 	tried := map[string]bool{"u1": true}
 	got := p.PickExcluding(tried)
 	if got == nil || got.UID != "u2" {
@@ -105,8 +105,8 @@ func TestPickExcludingStaysWithinHealthy(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u-cold"})
 	p.Add(&auth.Auth{UID: "u-hot"})
-	p.SetCredits("u-cold", 9999)
-	p.SetCredits("u-hot", 1)
+	p.SetCredits("u-cold", 9999, 0)
+	p.SetCredits("u-hot", 1, 0)
 	p.Cooldown("u-cold", CoolHard, time.Hour, "x")
 	for i := 0; i < 20; i++ {
 		got := p.PickExcluding(nil)
@@ -122,9 +122,9 @@ func TestPickWeightedSkewTowardHighCredits(t *testing.T) {
 	p := New("")
 	for _, u := range []string{"w1", "w2", "w3", "w4", "w5", "w6"} {
 		p.Add(&auth.Auth{UID: u})
-		p.SetCredits(u, 1)
+		p.SetCredits(u, 1, 0)
 	}
-	p.SetCredits("w1", 1000)
+	p.SetCredits("w1", 1000, 0)
 	counts := map[string]int{}
 	for i := 0; i < 5000; i++ {
 		counts[p.Pick().UID]++
@@ -163,12 +163,12 @@ func TestPickWeightedTopFiveOnly(t *testing.T) {
 	for _, u := range []string{"a1", "a2", "a3", "a4", "a5", "a6"} {
 		p.Add(&auth.Auth{UID: u})
 	}
-	p.SetCredits("a1", 1000)
-	p.SetCredits("a2", 1000)
-	p.SetCredits("a3", 1000)
-	p.SetCredits("a4", 1000)
-	p.SetCredits("a5", 1000)
-	p.SetCredits("a6", 5) // Top5 之外
+	p.SetCredits("a1", 1000, 0)
+	p.SetCredits("a2", 1000, 0)
+	p.SetCredits("a3", 1000, 0)
+	p.SetCredits("a4", 1000, 0)
+	p.SetCredits("a5", 1000, 0)
+	p.SetCredits("a6", 5, 0) // Top5 之外
 	for i := 0; i < 2000; i++ {
 		if got := p.Pick(); got == nil || got.UID == "a6" {
 			t.Fatalf("iter %d: picked %+v, a6 must stay outside top-5", i, got)
@@ -186,14 +186,14 @@ func TestPickTopFiveBySuccessRateNotCredits(t *testing.T) {
 	p.SetRandomSource(func(n int64) int64 { return 0 }) // r=0 → 选权重最高的候选
 	for _, u := range []string{"a1", "a2", "a3", "a4", "a5"} {
 		p.Add(&auth.Auth{UID: u})
-		p.SetCredits(u, 100)
+		p.SetCredits(u, 100, 0)
 		for i := 0; i < 99; i++ {
 			p.NoteError(u) // 成功率 1/(1+99)≈0.03
 		}
 		p.NoteSuccess(u)
 	}
 	p.Add(&auth.Auth{UID: "a6"})
-	p.SetCredits("a6", 90)
+	p.SetCredits("a6", 90, 0)
 	p.NoteSuccess("a6") // 成功率 100%
 
 	if got := p.Pick(); got == nil || got.UID != "a6" {
@@ -210,10 +210,10 @@ func TestPickTopFiveByIdleNotCredits(t *testing.T) {
 	now := time.Now()
 	for _, u := range []string{"a1", "a2", "a3", "a4", "a5"} {
 		p.Add(&auth.Auth{UID: u})
-		p.SetCredits(u, 100)
+		p.SetCredits(u, 100, 0)
 	}
 	p.Add(&auth.Auth{UID: "a6"})
-	p.SetCredits("a6", 90)
+	p.SetCredits("a6", 90, 0)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	// a1..a5 全部"刚被用过"，闲置补偿归零；a6 从未使用 → 闲置满分。
 	p.mu.Lock()
@@ -233,8 +233,8 @@ func TestPickDeterministicViaSetRandomSource(t *testing.T) {
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Add(&auth.Auth{UID: "u2"})
-	p.SetCredits("u1", 100)
-	p.SetCredits("u2", 50)
+	p.SetCredits("u1", 100, 0)
+	p.SetCredits("u2", 50, 0)
 	// r=0 ∈ [0,50) → 命中 u1。注入源应使选号完全确定。
 	for i := 0; i < 50; i++ {
 		if got := p.Pick(); got == nil || got.UID != "u1" {
@@ -355,7 +355,7 @@ func TestReenableIfCredits(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
-	p.ReenableIfCredits("u1", 500)
+	p.ReenableIfCredits("u1", 500, 0)
 	got := p.Pick()
 	if got == nil || got.UID != "u1" {
 		t.Fatalf("should reenable, pick=%+v", got)
@@ -366,7 +366,7 @@ func TestReenableZeroCreditsKeepsCooling(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
-	p.ReenableIfCredits("u1", 0)
+	p.ReenableIfCredits("u1", 0, 0)
 	st, _ := p.Status("u1")
 	if !st.Cooling {
 		t.Fatal("zero credits should stay cooling")
@@ -377,7 +377,7 @@ func TestReenableDoesNotTouchDisabled(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Disable("u1", "session dead")
-	p.ReenableIfCredits("u1", 500)
+	p.ReenableIfCredits("u1", 500, 0)
 	if p.Pick() != nil {
 		t.Fatal("disabled must not auto-reenable")
 	}
@@ -449,7 +449,7 @@ func TestReenableClearsCoolingNotBreaker(t *testing.T) {
 	p.CooldownUntilTomorrow4AM("u1", "余额不足") // 硬冷却（喂 fails，但此时阈值默认 3，不熔断）
 	p.SetBreaker(1, time.Hour, time.Hour)
 	p.NoteError("u1") // 触发熔断（fails→阈值1→fails=0, retryCount=1, breakerUntil 非零）
-	p.ReenableIfCredits("u1", 500)
+	p.ReenableIfCredits("u1", 500, 0)
 	st, _ := p.Status("u1")
 	if st.Reason != "" || st.Credits != 500 {
 		t.Errorf("signin should clear reason + set credits=500: %+v", st)
@@ -475,7 +475,7 @@ func TestReenableKeepsBreaker(t *testing.T) {
 	if bt, _ := p.breakerUntil("u1"); bt.IsZero() {
 		t.Fatal("precondition: breaker should be open")
 	}
-	p.ReenableIfCredits("u1", 500)
+	p.ReenableIfCredits("u1", 500, 0)
 	if bt, _ := p.breakerUntil("u1"); bt.IsZero() {
 		t.Fatal("signin must not clear breakerUntil")
 	}
@@ -767,7 +767,7 @@ func TestCooldownSoftStreakResetByReenable(t *testing.T) {
 	p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
 	failsBefore := p.breakerFails("u1")
 
-	p.ReenableIfCredits("u1", 500)
+	p.ReenableIfCredits("u1", 500, 0)
 	st, _ := p.Status("u1")
 	if st.SoftStreak != 0 {
 		t.Errorf("reenable should reset soft_streak, got %d", st.SoftStreak)
@@ -890,8 +890,8 @@ func TestPickExcludingForModelSkipsSoftCoolingSameModel(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Add(&auth.Auth{UID: "u2"})
-	p.SetCredits("u1", 1000)
-	p.SetCredits("u2", 1)
+	p.SetCredits("u1", 1000, 0)
+	p.SetCredits("u2", 1, 0)
 	p.SetRandomSource(func(n int64) int64 { return 0 }) // r=0 → 最高分 u1
 	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
 	got := p.PickExcludingForModel(nil, "glm-5.3")
@@ -905,9 +905,9 @@ func TestPickExcludingForModelSkipsSoftCoolingSameModel(t *testing.T) {
 func TestPickExcludingForModelAllowsDifferentModel(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.SetCredits("u1", 1000)
+	p.SetCredits("u1", 1000, 0)
 	p.Add(&auth.Auth{UID: "u2"})
-	p.SetCredits("u2", 1)
+	p.SetCredits("u2", 1, 0)
 	p.SetRandomSource(func(n int64) int64 { return 0 }) // r=0 → 最高分 u1
 	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
 	got := p.PickExcludingForModel(nil, "hy3-x")
@@ -922,8 +922,8 @@ func TestCooldownSoftWithoutModelRecordsNone(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Add(&auth.Auth{UID: "u2"})
-	p.SetCredits("u1", 1000)
-	p.SetCredits("u2", 1)
+	p.SetCredits("u1", 1000, 0)
+	p.SetCredits("u2", 1, 0)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.CooldownSoftForModel("u1", time.Minute, time.Time{}, "", "429 rate limit")
 	// 冷却中 + 不同 model 请求仍跳过 u1（无 softRateModel，不豁免）。
@@ -939,8 +939,8 @@ func TestPickExcludingForModelBreakerStillBlocks(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Add(&auth.Auth{UID: "u2"})
-	p.SetCredits("u1", 1000)
-	p.SetCredits("u2", 1)
+	p.SetCredits("u1", 1000, 0)
+	p.SetCredits("u2", 1, 0)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.SetBreaker(1, time.Hour, time.Hour)
 	p.NoteError("u1") // u1 熔断
@@ -959,8 +959,8 @@ func TestSoftRateModelClearedByPlainCooldown(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Add(&auth.Auth{UID: "u2"})
-	p.SetCredits("u1", 1000)
-	p.SetCredits("u2", 1)
+	p.SetCredits("u1", 1000, 0)
+	p.SetCredits("u2", 1, 0)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 
 	// 1) 6004 带解析时间 → 记录模型 glm-5.3。
@@ -1015,7 +1015,7 @@ func TestList(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1", Nickname: "nick1"})
 	p.Add(&auth.Auth{UID: "u2"})
-	p.SetCredits("u1", 42)
+	p.SetCredits("u1", 42, 0)
 	p.Cooldown("u2", CoolSoft, time.Minute, "429")
 	list := p.List()
 	if len(list) != 2 {
@@ -1056,7 +1056,7 @@ func TestFlushPersistsCredits(t *testing.T) {
 	fp := filepath.Join(dir, "state.json")
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
-	p.SetCredits("u1", 42)
+	p.SetCredits("u1", 42, 0)
 	p.Flush()
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
@@ -1075,7 +1075,7 @@ func TestAutoFlush(t *testing.T) {
 	fp := filepath.Join(dir, "state.json")
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
-	p.SetCredits("u1", 77)
+	p.SetCredits("u1", 77, 0)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -1116,7 +1116,7 @@ func TestSaveFailureRecordedAndRecovers(t *testing.T) {
 	}
 	p := New(filepath.Join(block, "state.json"))
 	p.Add(&auth.Auth{UID: "u1"})
-	p.SetCredits("u1", 42)
+	p.SetCredits("u1", 42, 0)
 	p.Flush()
 	if p.persistFails == 0 {
 		t.Fatal("persist failure should be recorded (visible), got 0")
@@ -1126,7 +1126,7 @@ func TestSaveFailureRecordedAndRecovers(t *testing.T) {
 	good := filepath.Join(t.TempDir(), "state.json")
 	p2 := New(good)
 	p2.Add(&auth.Auth{UID: "u1"})
-	p2.SetCredits("u1", 42)
+	p2.SetCredits("u1", 42, 0)
 	p2.Flush()
 	if p2.persistFails != 0 {
 		t.Fatalf("successful save should reset persistFails, got %d", p2.persistFails)
@@ -1334,8 +1334,8 @@ func TestWeightHighCreditsDominates(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "hi"})
 	p.Add(&auth.Auth{UID: "lo"})
-	p.SetCredits("hi", 1000)
-	p.SetCredits("lo", 10)
+	p.SetCredits("hi", 1000, 0)
+	p.SetCredits("lo", 10, 0)
 	wHi, wLo := p.entryWeight("hi"), p.entryWeight("lo")
 	if wHi <= wLo {
 		t.Errorf("high credits should weigh more: hi=%v lo=%v", wHi, wLo)
@@ -1346,8 +1346,8 @@ func TestWeightIdleCompensation(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "used"})
 	p.Add(&auth.Auth{UID: "idle"})
-	p.SetCredits("used", 100)
-	p.SetCredits("idle", 100)
+	p.SetCredits("used", 100, 0)
+	p.SetCredits("idle", 100, 0)
 	// used 1 小时前被选中过、idle 从未使用 → idle 权重更高（闲置补偿）。
 	p.mu.Lock()
 	p.byUID["used"].lastUsed = time.Now().Add(-1 * time.Hour)
@@ -1362,8 +1362,8 @@ func TestWeightLowSuccessRateDowngrades(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "good"})
 	p.Add(&auth.Auth{UID: "bad"})
-	p.SetCredits("good", 100)
-	p.SetCredits("bad", 100)
+	p.SetCredits("good", 100, 0)
+	p.SetCredits("bad", 100, 0)
 	p.NoteSuccess("good")
 	p.NoteError("bad")
 	p.NoteError("bad")
@@ -1396,8 +1396,8 @@ func TestWeightTopFiveSelectionChanges(t *testing.T) {
 	for _, u := range []string{"a", "b"} {
 		p.Add(&auth.Auth{UID: u})
 	}
-	p.SetCredits("a", 90) // a credits 略低，但久置
-	p.SetCredits("b", 100)
+	p.SetCredits("a", 90, 0) // a credits 略低，但久置
+	p.SetCredits("b", 100, 0)
 	p.mu.Lock()
 	p.byUID["b"].lastUsed = time.Now()
 	p.byUID["a"].lastUsed = time.Now().Add(-48 * time.Hour)
@@ -1454,8 +1454,8 @@ func TestPickSkipsInFlightFull(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "full"})
 	p.Add(&auth.Auth{UID: "free"})
-	p.SetCredits("full", 1000)
-	p.SetCredits("free", 1)
+	p.SetCredits("full", 1000, 0)
+	p.SetCredits("free", 1, 0)
 	p.SetMaxInFlight(1)
 	// full 占满唯一名额 → Pick 应跳过它，选 free（即使 credits 更低）。
 	p.Acquire("full")
@@ -1566,7 +1566,7 @@ func TestSaveMirrorsSnapshot(t *testing.T) {
 	ms := &memStore{}
 	p.SetStore(ms)
 	p.Add(&auth.Auth{UID: "u1"})
-	p.SetCredits("u1", 42)
+	p.SetCredits("u1", 42, 0)
 	p.Flush()
 	ms.mu.Lock()
 	raw := string(ms.saved)

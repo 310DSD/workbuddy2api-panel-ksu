@@ -122,7 +122,7 @@ func TestUserAgentOverrideBilling(t *testing.T) {
 		BillingBaseCN: "https://billing.example",
 		UserAgent:     "CustomAgent/1",
 	}
-	if _, err := c.UserResource(a); err != nil {
+	if _, _, err := c.UserResource(a); err != nil {
 		t.Errorf("userResource: %v", err)
 	}
 }
@@ -257,7 +257,7 @@ func TestBillingUA_WhenClientNameSet(t *testing.T) {
 		BillingBaseCN: "https://billing.example",
 		ClientName:    "WorkBuddy",
 	}
-	if _, err := c.UserResource(a); err != nil {
+	if _, _, err := c.UserResource(a); err != nil {
 		t.Errorf("userResource: %v", err)
 	}
 	// 自定义 client_version → WorkBuddy/6.0.0
@@ -273,7 +273,7 @@ func TestBillingUA_WhenClientNameSet(t *testing.T) {
 		ClientName:    "WorkBuddy",
 		ClientVersion: "6.0.0",
 	}
-	if _, err := c2.UserResource(a); err != nil {
+	if _, _, err := c2.UserResource(a); err != nil {
 		t.Errorf("userResource v2: %v", err)
 	}
 	// 显式 user_agent 仍优先于 billingUA
@@ -289,7 +289,7 @@ func TestBillingUA_WhenClientNameSet(t *testing.T) {
 		ClientName:    "WorkBuddy",
 		UserAgent:     billingUAAgentString,
 	}
-	if _, err := c3.UserResource(a); err != nil {
+	if _, _, err := c3.UserResource(a); err != nil {
 		t.Errorf("userResource v3: %v", err)
 	}
 }
@@ -309,7 +309,7 @@ func TestBillingUA_WhenClientNameEmpty(t *testing.T) {
 		BillingBaseCN: "https://billing.example",
 		ClientVersion: "6.0.0", // 配置了版本但 client_name 空 → 仍不设 UA
 	}
-	if _, err := c.UserResource(a); err != nil {
+	if _, _, err := c.UserResource(a); err != nil {
 		t.Errorf("userResource: %v", err)
 	}
 	if ua != "" {

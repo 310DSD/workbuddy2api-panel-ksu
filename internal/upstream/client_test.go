@@ -363,12 +363,15 @@ func TestUserResourceAggregation(t *testing.T) {
 		]}}}}`), nil
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	remain, err := c.UserResource(a)
+	remain, total, err := c.UserResource(a)
 	if err != nil {
 		t.Fatalf("resource: %v", err)
 	}
 	if remain != 1500 {
 		t.Errorf("remain=%d want 1500", remain)
+	}
+	if total != 3000 {
+		t.Errorf("total=%d want 3000", total)
 	}
 }
 
@@ -378,9 +381,12 @@ func TestUserResourceNegativeClamped(t *testing.T) {
 			{"PackageName":"p","CycleCapacitySize":100,"CycleCapacityRemain":-50,"CycleCapacityUsed":150}
 		]}}}}`), nil
 	})
-	remain, err := c.UserResource(&auth.Auth{AccessToken: "at"})
+	remain, total, err := c.UserResource(&auth.Auth{AccessToken: "at"})
 	if err != nil || remain != 0 {
 		t.Errorf("remain=%d err=%v, want 0 (clamped)", remain, err)
+	}
+	if total != 100 {
+		t.Errorf("total=%d want 100", total)
 	}
 }
 

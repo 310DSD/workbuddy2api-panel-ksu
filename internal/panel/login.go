@@ -207,9 +207,10 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		checkinMsg = err.Error()
 	}
 	remain := int64(-1)
-	if rm, err := p.cfg.Upstream.UserResource(a); err == nil {
-		remain = rm
-		p.cfg.Pool.ReenableIfCredits(acct.UID, rm)
+	total := int64(0)
+	if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
+		remain, total = rm, tt
+		p.cfg.Pool.ReenableIfCredits(acct.UID, rm, tt)
 	}
 
 	p.loginMu.Lock()
@@ -221,6 +222,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		"uid":             acct.UID,
 		"nickname":        acct.Nickname,
 		"credits":         remain,
+		"credits_total":   total,
 		"checkin_message": checkinMsg,
 	})
 }

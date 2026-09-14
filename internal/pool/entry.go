@@ -30,6 +30,7 @@ type Status struct {
 	UID             string    `json:"uid"`
 	Nickname        string    `json:"nickname,omitempty"`
 	Credits         int64     `json:"credits"`
+	CreditsTotal    int64     `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
 	Cooling         bool      `json:"cooling"`
 	CoolKind        string    `json:"cool_kind,omitempty"`
 	CoolRemaining   int64     `json:"cool_remaining_sec,omitempty"`
@@ -50,6 +51,7 @@ type Status struct {
 type entry struct {
 	a            *auth.Auth
 	credits      int64
+	creditsTotal int64 // 积分总额度（UserResource 聚合；0 = 未知）
 	successCount int64     // 累计成功
 	errTotal     int64     // 累计错误（供成功率权重 successRate = successCount/(successCount+errTotal)，不清零）
 	lastErr      time.Time // 最近一次错误时间
@@ -148,6 +150,7 @@ func (e *entry) fallbackKind(now time.Time) string {
 // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
 type stateAccount struct {
 	Credits      int64     `json:"credits"`
+	CreditsTotal int64     `json:"credits_total,omitempty"`
 	Disabled     bool      `json:"disabled"`
 	Reason       string    `json:"reason,omitempty"`
 	Until        time.Time `json:"until,omitempty"`

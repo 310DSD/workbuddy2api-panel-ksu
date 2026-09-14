@@ -293,15 +293,16 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	if checkinMsg != "" {
 		resp["checkin_message"] = checkinMsg
 	}
-	remain, err := p.cfg.Upstream.UserResource(a)
+	remain, total, err := p.cfg.Upstream.UserResource(a)
 	if err != nil {
 		resp["balance_error"] = err.Error()
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
-	p.cfg.Pool.ReenableIfCredits(uid, remain)
+	p.cfg.Pool.ReenableIfCredits(uid, remain, total)
 	resp["credits"] = remain
-	log.Printf("panel: checkin uid=%s msg=%q credits=%d", uid, checkinMsg, remain)
+	resp["credits_total"] = total
+	log.Printf("panel: checkin uid=%s msg=%q credits=%d/%d", uid, checkinMsg, remain, total)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -313,13 +314,13 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
-	remain, err := p.cfg.Upstream.UserResource(a)
+	remain, total, err := p.cfg.Upstream.UserResource(a)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "user resource: "+err.Error())
 		return
 	}
-	p.cfg.Pool.SetCredits(uid, remain)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain})
+	p.cfg.Pool.SetCredits(uid, remain, total)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": total})
 }
 
 // accountRemove 移除账号：先出池（立即落盘 state），再删 auth 文件。
