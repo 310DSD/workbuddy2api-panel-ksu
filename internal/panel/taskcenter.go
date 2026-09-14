@@ -134,13 +134,15 @@ type queueItem struct {
 	Message  string `json:"message,omitempty"`
 }
 
-// queueState 队列运行状态。
+// queueState 队列运行状态。Seq 每次启动 +1——前端只渲染"自己启动的那一轮"，
+// 执行结束后的残留 items 不会覆盖后续的扫描结果视图。
 type queueState struct {
 	mu        sync.Mutex
 	running   bool
 	startedAt time.Time
 	items     []queueItem
 	conc      int
+	seq       int
 }
 
 // Panel 队列字段在 Panel 结构体上（panel.go）由 initQueue 惰性初始化；
@@ -213,8 +215,13 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if wantSchool && p.cfg.Scheduler != nil {
-				if _, inPeriod, err := p.cfg.Upstream.SchoolTasks(a); err == nil && inPeriod {
-					one.school = true
+				if stasks, _, err := p.cfg.Upstream.SchoolTasks(a); err == nil {
+					for _, t := range stasks {
+						if schoolPending(t) { // 认证等不可做任务已在口径外
+							one.school = true
+							break
+						}
+					}
 				}
 			}
 			if len(one.grow) > 0 || one.school {
@@ -247,11 +254,13 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	q.startedAt = time.Now()
 	q.items = items
 	q.conc = body.Concurrency
+	q.seq++
+	seq := q.seq
 	q.mu.Unlock()
 
 	go p.runQueueItems(accts, items, body.Concurrency)
 	log.Printf("panel: 队列启动：%d 项（并发 %d，成长 %v 开学季 %v）", len(items), body.Concurrency, body.Growth, body.School)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": len(items)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": len(items), "seq": seq})
 }
 
 // runQueueItems 队列执行主体：按账号分组，账号内串行（per-account 锁），
@@ -281,6 +290,12 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 				return
 			}
 			defer p.unlockAccount(one.a.UID)
+			// 前置：批量接受尚未接受的任务。上游对 not_accepted 的任务不计数——
+			// 面板「一键完成」一直有这步，队列路径此前漏了（表现为上报 200 但进度
+			// 一直 not_accepted、无法领奖）。失败不阻塞（行为事件才是进度判据）。
+			if accepted := p.acceptPendingTasks(one.a); accepted > 0 {
+				time.Sleep(reportGap) // 给上游状态流转留时间
+			}
 			for i := range q.items {
 				uid, kind, code := q.snapshotAt(i)
 				if uid != one.a.UID {
@@ -338,6 +353,29 @@ func (p *Panel) queueSet(q *queueState, uid string, fn func(*queueItem)) {
 			fn(&q.items[i])
 		}
 	}
+}
+
+// acceptPendingTasks 批量接受该账号未接受的任务，返回接受的个数（失败返回 0 不阻塞）。
+func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
+	tasks, err := p.cfg.Upstream.ListTasks(a)
+	if err != nil {
+		return 0
+	}
+	var codes []string
+	for _, t := range tasks {
+		if !t.Claimed && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
+			codes = append(codes, t.TaskCode)
+		}
+	}
+	if len(codes) == 0 {
+		return 0
+	}
+	if err := p.cfg.Upstream.AcceptTasks(a, codes); err != nil {
+		log.Printf("panel: 队列 accept uid=%s: %v（不阻塞）", a.UID, err)
+		return 0
+	}
+	log.Printf("panel: 队列 accept uid=%s: 已接受 %d 个任务", a.UID, len(codes))
+	return len(codes)
 }
 
 // runGrowthQueued 执行单个成长任务（动作 + 回读 + 自动领奖；与
@@ -408,6 +446,7 @@ func (p *Panel) tasksQueueStatus(w http.ResponseWriter, r *http.Request) {
 		"conc":      q.conc,
 		"started":   !q.startedAt.IsZero(),
 		"started_at": q.startedAt,
+		"seq":       q.seq,
 		"items":     items,
 	})
 }

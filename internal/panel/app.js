@@ -639,7 +639,10 @@ async function loadSchoolStatus(quiet) {
       (v.tasks || []).forEach(t => by[t.task_code] = t);
       const cells = SCHOOL_META.map(([code]) => {
         const t = by[code];
-        return '<span title="' + esc(SCHOOL_TITLES[code] || code) + '">' + staskHTML(t) + '</span>';
+        const html = code === 'task_student_verify'
+          ? '<span class="stask todo"><span class="mark">—</span>不做</span>'
+          : staskHTML(t);
+        return '<span title="' + esc(SCHOOL_TITLES[code] || code) + '">' + html + '</span>';
       }).join('');
       const done = SCHOOL_META.filter(([code]) => code !== 'task_student_verify' && by[code] && by[code].status === 'claimed').length;
       allDone += done === 4 ? 1 : 0;
@@ -671,8 +674,10 @@ $('btnSchoolRunAll').onclick = async () => {
   } catch (e) { toast(e.message, 'err'); }
 };
 
-/* 成长任务队列 */
-let queueTimer = null;
+/* 成长任务队列。lastQueueSeq 记录本页启动过的队列代次：执行结束后的残留 items
+   （running=false 但 seq 停在旧值）不再回写视图——否则扫描结果 3 秒后被上一轮
+   队列状态覆盖。 */
+let queueTimer = null, lastQueueSeq = 0;
 const GROWTH_TITLES = {}; // code → 展示名（扫描时从任务列表带出）
 $('btnScanAll').onclick = async () => {
   const b = $('btnScanAll');
@@ -691,6 +696,7 @@ $('btnRunQueue').onclick = async () => {
   try {
     const r = await api('tasks/run_queue', { method: 'POST', body: JSON.stringify({ concurrency: conc }) });
     if (!r.started) { toast(r.message || '没有待办任务', 'ok'); return; }
+    lastQueueSeq = r.seq || 0;
     toast('队列已启动：' + r.total + ' 项（并发 ' + conc + '）', 'ok');
     startQueuePolling();
   } catch (e) { toast(e.message, 'err'); }
@@ -706,6 +712,7 @@ function groupItems(d) {
       rows.push({ kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: 'scan' });
     }
     for (const t of (a.school || [])) {
+      if (t.task_code === 'task_student_verify') continue; // 需真实认证，永不出现在待办
       rows.push({ kind: 'school', code: t.task_code, prog: t.target_count ? t.progress + '/' + t.target_count : '—', status: 'scan' });
     }
     if (rows.length) groups.push({ uid: a.uid, nick: a.nickname, rows });
@@ -772,6 +779,8 @@ async function pollQueueOnce() {
   try {
     const q = await api('tasks/queue');
     if (!q.started) return;
+    // 只渲染本页启动过的那轮队列（q.running 时也要同代次——刷新页面后不再接管旧队列）。
+    if (lastQueueSeq && q.seq !== lastQueueSeq) return;
     renderQueue(groupsFromQueue(q.items || []), q);
   } catch (e) { /* 静默 */ }
 }
