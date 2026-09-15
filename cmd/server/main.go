@@ -358,7 +358,30 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return nil, fmt.Errorf("replace config: %w", err)
+		// A single-file Docker bind mount cannot be renamed over its mount
+		// target (Linux returns EBUSY / "device or resource busy"). Keep the
+		// atomic path for regular files, but update the mounted file in place
+		// for this specific deployment shape.
+		if !errors.Is(err, syscall.EBUSY) {
+			return nil, fmt.Errorf("replace config: %w", err)
+		}
+		f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+		if openErr != nil {
+			_ = os.Remove(tmp)
+			return nil, fmt.Errorf("replace config (bind mount fallback): %w", openErr)
+		}
+		_, writeErr := f.Write(out)
+		if writeErr == nil {
+			writeErr = f.Sync()
+		}
+		closeErr := f.Close()
+		_ = os.Remove(tmp)
+		if writeErr != nil {
+			return nil, fmt.Errorf("replace config (bind mount fallback): %w", writeErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("replace config (bind mount fallback): %w", closeErr)
+		}
 	}
 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
