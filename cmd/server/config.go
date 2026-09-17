@@ -115,14 +115,15 @@ type Config struct {
 
 	Prompt struct {
 		// Mode passthrough（默认）= 透传客户端原始 system（降级重试仍会切到 Degraded）；
-		// custom = 网关用自有系统提示词替换客户端 system/developer。
-		Mode string `json:"mode"` // "passthrough" / "custom"
+		// custom = 网关用自有系统提示词替换客户端 system/developer；
+		// append = 两者并用：开头连续 system/developer 块后插网关 system，既有消息逐字不动（issue #129）。
+		Mode string `json:"mode"` // "passthrough" / "custom" / "append"
 		// File 提示词文件路径；空 = 内置默认 defaultprompt.md；
 		// 路径非空但不可读 → 启动报错（fail fast，避免静默回落到内置默认）。
 		File string `json:"file"`
 	} `json:"prompt"`
 
-	// PromptText 解析后的系统提示词文本（custom 模式使用）。
+	// PromptText 解析后的系统提示词文本（custom/append 模式使用）。
 	PromptText string `json:"-"`
 
 	Upstash struct {
@@ -139,13 +140,19 @@ type Config struct {
 		// 连败降权（issue #114）：ErrClient/传输层这类「不罚号」失败连续计数，达阈
 		// 临时出池。与冷却/熔断并存取更长者不叠加。默认 5 次 / 10m。
 		DegradeThreshold   int     `json:"degrade_threshold"`    // 连败次数触发降权，默认 5
-		DegradeCooldown    string  `json:"degrade_cooldown"`     // 降权时长，默认 "10m"
-		DegradeCooldownMax string  `json:"degrade_cooldown_max"` // 降权封顶，默认 "2h"
+		DegradeCooldown    string  `json:"degrade_cooldown"`     // 降权时长（固定，非指数退避），默认 "10m"
+		DegradeCooldownMax string  `json:"degrade_cooldown_max"` // 降权时长的上限钳制，默认 "2h"（仅当 cooldown 超该值才钳制）
 		IdleWeightPerHour  float64 `json:"idle_weight_per_hour"` // 闲置补偿：每小时未用 +0.5 权重
 		IdleWeightMax      float64 `json:"idle_weight_max"`      // 闲置补偿封顶，默认 5.0
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到/余额刷新时，到期时间在
 		// 此窗口内的积分被标记为"快过期"，选号优先消耗。空/0 = 禁用分桶。
 		ExpiringSoon string `json:"expiring_soon"`
+		// CostExploreInterval costTier 条件探索窗口（issue #136 方案 a′）：tier 0
+		// 垄断层存在且 tier 1 有成员时，距上次探索 ≥ 窗口则本次 pick 生效层切
+		// tier 1-only（探索=搭车改道，零新增上游请求；成功即毕业，失败走既有
+		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
+		// 空值回落默认。
+		CostExploreInterval string `json:"cost_explore_interval"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -165,6 +172,8 @@ type Config struct {
 	SessionGCInterval      time.Duration `json:"-"`
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
 	ExpiringSoonDur        time.Duration `json:"-"`
+	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
+	CostExploreIntervalDur time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -215,6 +224,8 @@ func Default() *Config {
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
+	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
+	c.Pool.CostExploreInterval = "30m"
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -417,6 +428,18 @@ func (c *Config) normalize() error {
 			return fmt.Errorf("pool.expiring_soon: %w", err)
 		}
 	}
+	// costTier 探索窗口（issue #136）：空值回落默认 30m（Default 已置；此兜底覆盖
+	// 显式 ""）；"0" 是合法值（关停，完全回到现状行为），不回落；负值钳 0 同关停
+	//（"−5m" 无合理语义）。
+	if c.Pool.CostExploreInterval == "" {
+		c.Pool.CostExploreInterval = "30m"
+	}
+	if c.CostExploreIntervalDur, err = time.ParseDuration(c.Pool.CostExploreInterval); err != nil {
+		return fmt.Errorf("pool.cost_explore_interval: %w", err)
+	}
+	if c.CostExploreIntervalDur < 0 {
+		c.CostExploreIntervalDur = 0
+	}
 	if c.Pool.BreakerThreshold <= 0 {
 		c.Pool.BreakerThreshold = 3
 	}
@@ -484,10 +507,11 @@ func (c *Config) normalize() error {
 	return c.normalizePrompt()
 }
 
-// normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom 模式）。
+// normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。
 //
-// mode 非法（非 custom/passthrough）启动报错，避免静默回落到某一分支；
-// custom 模式下 file 非空但不可读 → 报错（fail fast），file 空 → 用内置默认。
+// mode 非法（非 passthrough/custom/append）启动报错，避免静默回落到某一分支；
+// custom/append 模式下 file 非空但不可读 → 报错（fail fast），file 空 → 用内置默认
+// （两模式共用同一加载路径，PromptText 均非空）。
 // passthrough 模式不加载文本（透传客户端原始 system，文本在降级时用 prompt.Degraded）。
 func (c *Config) normalizePrompt() error {
 	switch m := strings.ToLower(strings.TrimSpace(c.Prompt.Mode)); m {
@@ -495,10 +519,12 @@ func (c *Config) normalizePrompt() error {
 		c.Prompt.Mode = "passthrough"
 	case "custom":
 		c.Prompt.Mode = "custom"
+	case "append":
+		c.Prompt.Mode = "append"
 	default:
-		return fmt.Errorf("prompt.mode: %q 不是合法值（passthrough / custom）", c.Prompt.Mode)
+		return fmt.Errorf("prompt.mode: %q 不是合法值（passthrough / custom / append）", c.Prompt.Mode)
 	}
-	if c.Prompt.Mode == "custom" {
+	if c.Prompt.Mode == "custom" || c.Prompt.Mode == "append" {
 		text, err := prompt.Load(c.Prompt.Mode, c.Prompt.File)
 		if err != nil {
 			return err

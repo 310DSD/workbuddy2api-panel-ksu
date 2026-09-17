@@ -348,7 +348,8 @@ func (c *Client) globalModelsOnce(a *auth.Auth, path string) ([]string, []ModelI
 		return nil, nil, err
 	}
 	c.CommonHeaders(req, a) // 共享请求头（Origin/Referer/UA），与 FetchModels 同款
-	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	// AccessToken 加锁快照（见 auth.AccessTokenValue：keepalive 刷新在 a.mu 内改写）。
+	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, nil, err
