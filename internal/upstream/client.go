@@ -1026,6 +1026,10 @@ type ModelInfo struct {
 type dynModelEntry struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// ModelID / Model id 的宽松回退键（仅 global 目录的多信封兜底用，CN 目录
+	// 不下发这两个键；字段加在这里只是让 typed 解析能"看见"它们）。
+	ModelID         string   `json:"modelId"`
+	Model           string   `json:"model"`
 	Description     string   `json:"descriptionZh"`
 	Credits         string   `json:"credits"`
 	Tags            []string `json:"tags"`
