@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>WorkBuddy2API</title>
+<style>
+:root{--bg:#0c0e14;--card:#14171f;--line:#262c3a;--ink:#e8ebf2;--muted:#8b93a5;--accent:#5b7cfa;--ok:#3ddc97;--bad:#f0655f;--warn:#f5b544}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{min-height:100%;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"PingFang SC","Noto Sans SC",sans-serif}
+body{padding:20px 18px 36px;max-width:480px;margin:0 auto}
+.brand{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.logo{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,#5b7cfa,#7c5cff);display:grid;place-items:center;font-weight:700}
+h1{font-size:18px;letter-spacing:-.02em}
+.sub{color:var(--muted);font-size:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+.row{display:flex;justify-content:space-between;gap:10px;padding:7px 0;font-size:13.5px}
+.k{color:var(--muted)}.v{font-family:ui-monospace,monospace;word-break:break-all;text-align:right}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:600}
+.badge i{width:7px;height:7px;border-radius:50%;background:currentColor}
+.ok{color:var(--ok);background:rgba(61,220,151,.12)}.bad{color:var(--bad);background:rgba(240,101,95,.12)}.warn{color:var(--warn);background:rgba(245,181,68,.12)}
+.btns{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+button{appearance:none;border:1px solid var(--line);background:#1a1e28;color:var(--ink);border-radius:10px;padding:12px 10px;font:inherit;font-weight:600}
+.primary{background:var(--accent);border-color:var(--accent);color:#fff;grid-column:1/-1}
+.ghost{background:transparent;grid-column:1/-1}
+.note{color:var(--muted);font-size:12px;margin-top:10px}
+.url{margin-top:8px;padding:8px 10px;border:1px dashed var(--line);border-radius:8px;font:12px/1.45 ui-monospace,monospace;word-break:break-all;color:var(--accent)}
+#log{margin-top:10px;font:12px/1.6 ui-monospace,monospace;color:var(--muted);white-space:pre-wrap;word-break:break-all;max-height:140px;overflow:auto}
+</style>
+</head>
+<body>
+  <div class="brand">
+    <div class="logo">WB</div>
+    <div><h1>WorkBuddy2API</h1><div class="sub">KernelSU 模块入口 · 面板请用浏览器打开</div></div>
+  </div>
+  <div class="card">
+    <div class="row"><span class="k">服务</span><span id="stBadge" class="badge warn"><i></i>检测中</span></div>
+    <div class="row"><span class="k">PID</span><span class="v" id="stPid">-</span></div>
+    <div class="row"><span class="k">监听</span><span class="v" id="stListen">0.0.0.0:7863</span></div>
+    <div class="row"><span class="k">本机 / 局域网</span><span class="v" id="stIps">127.0.0.1</span></div>
+    <div class="row"><span class="k">API Key</span><span class="v" id="stKey">-</span></div>
+    <div class="btns">
+      <button class="primary" id="btnBrowser">用系统浏览器打开面板</button>
+      <button id="btnLan">用局域网地址打开</button>
+      <button id="btnStart">启动</button>
+      <button id="btnStop">停止</button>
+      <button class="ghost" id="btnRestart">重启服务</button>
+    </div>
+    <div class="note">面板请用系统浏览器打开。启动/重启走 KernelSU Action 通道（与模块 Action 按钮相同），避免 WebUI 拉起的进程被 App 冻结。</div>
+    <div class="url" id="stUrl">http://127.0.0.1:7863/panel/</div>
+    <div id="log"></div>
+  </div>
+<script>
+const CTRL='/data/adb/modules/wb2api_panel/scripts/control.sh';
+let info={running:0,api_key:'',listen:'0.0.0.0:7863',ips:''};
+const logEl=document.getElementById('log');
+function log(s){logEl.textContent=(logEl.textContent+s+'\n').slice(-1600)}
+function exec(cmd){
+  return new Promise((resolve,reject)=>{
+    const cb='cb_'+Math.random().toString(36).slice(2);
+    window[cb]=(errno,stdout,stderr)=>{delete window[cb];resolve({errno:Number(errno),stdout:String(stdout||''),stderr:String(stderr||'')})};
+    try{
+      if(typeof ksu==='undefined'||!ksu.exec){delete window[cb];reject(new Error('不在 KernelSU WebUI'));return}
+      try{ksu.exec(cmd,'{}',cb)}catch(e){ksu.exec(cmd,cb)}
+    }catch(e){delete window[cb];reject(e)}
+  });
+}
+function parseStatus(text){
+  const o={};
+  String(text||'').split('\n').forEach(line=>{const i=line.indexOf('=');if(i>0)o[line.slice(0,i).trim()]=line.slice(i+1).trim()});
+  return o;
+}
+function portOf(){
+  const a=info.listen||'0.0.0.0:7863';
+  const i=a.lastIndexOf(':');
+  return i>=0?a.slice(i+1):'7863';
+}
+function localUrl(){return 'http://127.0.0.1:'+portOf()+'/panel/'}
+function lanUrl(){
+  const ip=(info.ips||'').trim().split(/\s+/)[0];
+  if(!ip) return localUrl();
+  return 'http://'+ip+':'+portOf()+'/panel/';
+}
+function render(){
+  const run=String(info.running)==='1';
+  const badge=document.getElementById('stBadge');
+  badge.className='badge '+(run?'ok':'bad');
+  badge.innerHTML='<i></i>'+(run?'运行中':'未运行');
+  document.getElementById('stPid').textContent=info.pid||'-';
+  document.getElementById('stListen').textContent=info.listen||'0.0.0.0:7863';
+  document.getElementById('stIps').textContent=(info.ips||'127.0.0.1').trim()||'127.0.0.1';
+  document.getElementById('stKey').textContent=info.api_key||'(空)';
+  document.getElementById('stUrl').textContent=localUrl();
+}
+async function refresh(){
+  try{
+    const r=await exec('sh '+CTRL+' status');
+    info=Object.assign(info,parseStatus(r.stdout));
+    if(r.errno) log('status errno='+r.errno);
+  }catch(e){log(String(e))}
+  render();
+  return String(info.running)==='1';
+}
+async function ksudStart(){
+  const r=await exec('sh '+CTRL+' ksud-start');
+  log((r.stdout||r.stderr||'').trim()||('ksud-start errno='+r.errno));
+  await new Promise(res=>setTimeout(res,1200));
+  return refresh();
+}
+async function ensureUp(){
+  const ok=await refresh();
+  if(ok) return true;
+  log('服务未运行，经 KernelSU Action 启动…');
+  await ksudStart();
+  return String(info.running)==='1';
+}
+async function openBrowser(url){
+  await ensureUp();
+  const u=url||localUrl();
+  document.getElementById('stUrl').textContent=u;
+  const cmd="am start --user 0 -a android.intent.action.VIEW -d '"+u+"'";
+  try{
+    const r=await exec(cmd);
+    log((r.stdout||r.stderr||'已请求打开浏览器').trim()||('open '+u));
+    if(typeof ksu!=='undefined'&&ksu.toast) ksu.toast('已跳转到浏览器');
+  }catch(e){
+    log('无法拉起浏览器，请手动访问: '+u);
+  }
+}
+document.getElementById('btnBrowser').onclick=()=>openBrowser(localUrl());
+document.getElementById('btnLan').onclick=()=>openBrowser(lanUrl());
+document.getElementById('btnStart').onclick=async()=>{
+  const ok=await refresh();
+  if(ok){log('已在运行 pid='+(info.pid||''));return}
+  log('经 KernelSU Action 启动…');
+  await ksudStart();
+};
+document.getElementById('btnStop').onclick=async()=>{log((await exec('sh '+CTRL+' stop')).stdout);await refresh()};
+document.getElementById('btnRestart').onclick=async()=>{
+  log('经 KernelSU Action 重启…');
+  await ksudStart();
+};
+(async()=>{
+  try{if(typeof ksu!=='undefined'&&ksu.fullScreen)ksu.fullScreen(false)}catch(e){}
+  await refresh();
+})();
+</script>
+</body>
+</html>

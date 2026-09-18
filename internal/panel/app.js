@@ -17,6 +17,8 @@ function effTheme() {
 function applyTheme() {
   const eff = effTheme();
   document.documentElement.dataset.theme = eff;
+  const tc = document.querySelector('meta[name="theme-color"]:not([media]), meta[name="theme-color"][media*="' + (eff === 'light' ? 'light' : 'dark') + '"]');
+  if (tc) tc.setAttribute('content', eff === 'light' ? '#f4f5f8' : '#0c0e14');
   $('icoTheme').innerHTML = eff === 'light'
     ? '<circle cx="8" cy="8" r="3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.2 3.2l1.4 1.4M11.4 11.4l1.4 1.4M12.8 3.2l-1.4 1.4M4.6 11.4l-1.4 1.4"/>'
     : '<path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/>';

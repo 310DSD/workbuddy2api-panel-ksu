@@ -63,7 +63,7 @@ func NewRing(capacity int) *Ring {
 	if capacity <= 0 {
 		capacity = 500
 	}
-	return &Ring{cap: capacity}
+	return &Ring{cap: capacity, entries: make([]LogEntry, 0, capacity)}
 }
 
 // Write 按 \n 切分入环（实现 io.Writer）。空行丢弃；超容量淘汰最旧行。
@@ -77,8 +77,14 @@ func (r *Ring) Write(p []byte) (int, error) {
 		}
 		text := tsPrefixRe.ReplaceAllString(line, "")
 		r.entries = append(r.entries, LogEntry{TS: now, Ch: classifyLine(text), Text: text})
-		if overflow := len(r.entries) - r.cap; overflow > 0 {
-			r.entries = r.entries[overflow:]
+	}
+	if extra := len(r.entries) - r.cap; extra > 0 {
+		copy(r.entries[0:r.cap], r.entries[extra:])
+		r.entries = r.entries[:r.cap]
+		if cap(r.entries) > r.cap*2 {
+			trimmed := make([]LogEntry, r.cap, r.cap)
+			copy(trimmed, r.entries)
+			r.entries = trimmed
 		}
 	}
 	return len(p), nil

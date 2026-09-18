@@ -44,3 +44,10 @@ docs/
 /cmd/desktopverify*/
 *.zip
 server.exe
+# KernelSU / Android build artifacts
+kernelsu/bin/
+wb2api
+*.zip
+*.tar.gz
+
+!EXPORT.md

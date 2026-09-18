@@ -189,7 +189,7 @@ func (p *Pool) saveLocked() {
 		return
 	}
 	sf := p.stateOverviewLocked()
-	raw, err := json.MarshalIndent(sf, "", "  ")
+	raw, err := json.Marshal(sf)
 	if err != nil {
 		p.notePersistFail(err)
 		return
