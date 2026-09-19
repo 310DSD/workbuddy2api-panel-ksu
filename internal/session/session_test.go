@@ -337,4 +337,15 @@ func TestExtractKeyMultimodalContent(t *testing.T) {
 	if ExtractKey([]byte(body2)) != k {
 		t.Error("image url changes must not break derived key stability")
 	}
+	// 纯图片首条 user（无 text part）也应派生非空键（首图会话粘性盲区修复；
+	// 图片只入类型占位，同图重发/换 URL 均同键）。
+	imgOnly := `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://x/y.png"}}]}]}`
+	k2 := ExtractKey([]byte(imgOnly))
+	if k2 == "" || !strings.HasPrefix(k2, "d-") {
+		t.Fatalf("pure-image first user should derive a key, got %q", k2)
+	}
+	imgOnly2 := `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://x/z.png"}}]}]}`
+	if ExtractKey([]byte(imgOnly2)) != k2 {
+		t.Error("pure-image url changes must keep same derived key")
+	}
 }
