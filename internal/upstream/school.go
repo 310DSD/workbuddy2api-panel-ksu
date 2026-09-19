@@ -129,6 +129,9 @@ func (c *Client) SchoolDraw(a *auth.Auth) (string, error) {
 
 const mpReportPath = "/v2/report"
 
+// schoolOpenDayActivityID 开学季/校园日活动 id（事件 activityId 字段值，两域共用）。
+const schoolOpenDayActivityID = "school_open_day_2026"
+
 // mpEventBase 小程序埋点公共指纹（appservice wQ()+Ao() 对齐）。
 func mpEventBase(a *auth.Auth) map[string]any {
 	return map[string]any{
@@ -207,6 +210,16 @@ func SchoolChatTimesEvents(conversationID string) map[string]any {
 		"codebuddy.session_id":              conversationID,
 		"codebuddy.conversation_request_id": rid,
 	}
+}
+
+// SchoolSeasonChatEvent 构造 growth 域「校园日」（school_season）判据事件：
+// mini 指纹 chat_request_send + activityId=school_open_day_2026（与 school 域
+// 开学季同 activityId 关联；实测无 activityId 的事件不点亮）。事件形状与
+// SchoolChatTimesEvents 同构（school 域 chat_3_times 同款），仅追加 activityId。
+func SchoolSeasonChatEvent(conversationID string) map[string]any {
+	ev := SchoolChatTimesEvents(conversationID)
+	ev["activityId"] = schoolOpenDayActivityID
+	return ev
 }
 
 // SchoolExpertUseEvents 构造专家召唤+对话事件链（expert_use 判据，三账号实测）。

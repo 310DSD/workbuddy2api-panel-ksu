@@ -101,6 +101,20 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+			// 小程序口径任务（school_season 校园日 / Sequential_Tasks_1 小程序首对话）
+			// 仅在 mp 头列表下发，与默认口径不重叠——合并进待办列表；mp 列表失败
+			// 静默（无 mp 任务的部署/活动结束时零影响）。
+			if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
+				seen := map[string]bool{}
+				for _, t := range it.Growth {
+					seen[t.TaskCode] = true
+				}
+				for _, t := range mpTasks {
+					if growthPending(t) && !seen[t.TaskCode] {
+						it.Growth = append(it.Growth, t)
+					}
+				}
+			}
 			if stasks, inPeriod, err := p.cfg.Upstream.SchoolTasks(a); err != nil {
 				it.SchoolErr = err.Error()
 			} else {
@@ -393,6 +407,7 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	if act == nil {
 		return "", fmt.Errorf("任务 %s 无自动动作", code)
 	}
+	// taskByCode 已双口径（mp 专属码自动回落 mp 列表）。
 	before, err := p.taskByCode(a, code)
 	if err != nil {
 		return "", err
@@ -400,6 +415,7 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	if before == nil {
 		return "该账号无此任务", nil
 	}
+	isMP := isMPTaskCode(code)
 	if before.Claimed {
 		return "已完成（已领取）", nil
 	}
@@ -407,9 +423,21 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	after, _ := p.taskByCodeWaiting(a, code)
+	var after *upstream.Task
+	if isMP {
+		after, _ = p.taskByCodeMP(a, code)
+	} else {
+		after, _ = p.taskByCodeWaiting(a, code)
+	}
 	if after != nil && after.Claimable {
-		if credit, energy, cerr := p.cfg.Upstream.ClaimReward(a, code); cerr == nil && (credit > 0 || energy > 0) {
+		var credit, energy int64
+		var cerr error
+		if isMP {
+			credit, energy, cerr = p.cfg.Upstream.ClaimRewardMP(a, code)
+		} else {
+			credit, energy, cerr = p.cfg.Upstream.ClaimReward(a, code)
+		}
+		if cerr == nil && (credit > 0 || energy > 0) {
 			msg += fmt.Sprintf("；自动领奖 +%d 分 +%d 能", credit, energy)
 		}
 	}
