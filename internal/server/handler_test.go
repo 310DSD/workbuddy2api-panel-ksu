@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -110,130 +111,27 @@ func testPoolWith(auths ...*auth.Auth) *pool.Pool {
 	return p
 }
 
-// TestChatBodyLimitExactAllowed 恰好等于上限的请求体正常放行到上游（不被 413 误伤）。
-func TestChatBodyLimitExactAllowed(t *testing.T) {
+// TestChatLargeBodyNoGatewayLimit 请求体无网关侧上限（max_body_mb 已移除）：
+// 数 MB 的合法 body 完整读入并照常打上游，网关不再 413（超限类问题交由上游
+// 自然响应，对齐上游 e34cfa4 规约）。
+func TestChatLargeBodyNoGatewayLimit(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls++
 		return 200, sseOK, true
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: up, MaxBodyBytes: 100})
-	const prefix = `{"model":"glm-5.2","messages":[],"pad":"`
-	const suffix = `"}`
-	pad := strings.Repeat("a", 100-len(prefix)-len(suffix)) // 恰好 100 字节
-	if body := prefix + pad + suffix; len(body) != 100 {
-		t.Fatalf("fixture len=%d want 100", len(body))
-	}
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	pad := strings.Repeat("a", 4<<20) // 4MB 合法 JSON 字符串值
+	body := []byte(`{"model":"glm-5.2","messages":[],"pad":"` + pad + `"}`)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(prefix+pad+suffix)))
-	if rec.Code != 200 {
-		t.Fatalf("code=%d body=%s (exactly-at-limit body must proceed)", rec.Code, rec.Body)
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s (large valid body must proceed)", rec.Code, rec.Body)
 	}
 	if calls != 1 {
 		t.Errorf("upstream calls=%d want 1", calls)
-	}
-}
-
-// TestChatOversizedBodyReturns413 请求体超过上限 → 直接 413 request_body_too_large：
-// 不打上游（calls=0）、不罚账号（无冷却/无熔断计数/无禁用）、不轮转。
-func TestChatOversizedBodyReturns413(t *testing.T) {
-	var calls int
-	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		calls++
-		return 200, sseOK, true
-	})
-	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: up, MaxBodyBytes: 100})
-	const prefix = `{"model":"glm-5.2","messages":[],"pad":"`
-	const suffix = `"}`
-	// 101 字节 > 100 上限。
-	pad := strings.Repeat("a", 100-len(prefix)-len(suffix)+1)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(prefix+pad+suffix)))
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("code=%d body=%s want 413", rec.Code, rec.Body)
-	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "request_body_too_large") {
-		t.Errorf("body should carry request_body_too_large: %s", body)
-	}
-	if !strings.Contains(body, "server.max_body_mb") {
-		t.Errorf("413 message should name config key server.max_body_mb: %s", body)
-	}
-	if calls != 0 {
-		t.Errorf("upstream must not be called on 413, got %d", calls)
-	}
-	st, _ := p.Status("u1")
-	if st.Cooling || st.Disabled || st.ErrTotal != 0 {
-		t.Errorf("413 must not penalize account: %+v", st)
-	}
-	if st.TokenUsage.RequestCount != 0 {
-		t.Errorf("413 must not record token usage: %+v", st.TokenUsage)
-	}
-}
-
-// TestChatOversizedBodyDefaultLimitHeader 未显式设置 MaxBodyBytes 时兜底 8MB：
-// 8MB+1 的请求体必须 413（不再静默截断喂给上游，issue #41 根因）。
-func TestChatOversizedBodyDefaultLimit(t *testing.T) {
-	var calls int
-	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		calls++
-		return 200, sseOK, true
-	})
-	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: up}) // 不注入 MaxBodyBytes → 默认 8MB
-
-	body := make([]byte, 8<<20+1) // 8MB+1
-	copy(body, `{"model":"glm-5.2","messages":[]}`)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body)))
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("code=%d want 413 (8MB+1 must be rejected)", rec.Code)
-	}
-	if calls != 0 {
-		t.Errorf("upstream must not be called, got %d", calls)
-	}
-}
-
-// TestSetMaxBodyBytesHotApply 面板在线改 server.max_body_mb 必须即时生效（issue #17：
-// 改了配置却静默不生效，用户仍被旧上限 413）。同一请求体：调小后 413、调大后放行，
-// 全程不重建 handler。另覆盖 setter 的 <=0 兜底（回落 8MB）。
-func TestSetMaxBodyBytesHotApply(t *testing.T) {
-	var calls int
-	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		calls++
-		return 200, sseOK, true
-	})
-	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: up, MaxBodyBytes: 100})
-
-	// 尾部空格不影响 JSON 合法性，只把请求体撑过 100 字节。
-	body := []byte(`{"model":"glm-5.2","messages":[]}` + strings.Repeat(" ", 128))
-
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body)))
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("code=%d want 413 (body 228B > limit 100B)", rec.Code)
-	}
-
-	h.SetMaxBodyBytes(4096) // 面板保存路径的热更新
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body)))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("code=%d want 200 after enlarge (limit 4096B)", rec.Code)
-	}
-	if calls != 1 {
-		t.Errorf("upstream calls = %d, want 1（放行后应恰好打一次）", calls)
-	}
-
-	// <=0 兜底回落 8MB：8MB+1 仍拒，8MB-1 放行。
-	h.SetMaxBodyBytes(0)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
-		bytes.NewReader(append(body, make([]byte, 8<<20)...))))
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("code=%d want 413 (fallback 8MB, body > 8MB)", rec.Code)
 	}
 }
 
@@ -1036,9 +934,9 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 	dynamicModelsCache.lastFail = time.Time{}
 	dynamicModelsCache.Unlock()
 
-	var calls int
+	var calls atomic.Int32 // FetchModels 企业/v3 两路并发探测回调，计数须原子
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		calls++
+		calls.Add(1)
 		return 500, `boom`, false
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
@@ -1054,8 +952,8 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 		}
 	}
 	// 一轮探测 = 2 次上游调用（企业端点 + /v3/config 并发，两路全失败才进负缓存）。
-	if calls != 2 {
-		t.Errorf("want 2 probes (console + v3), got %d", calls)
+	if got := calls.Load(); got != 2 {
+		t.Errorf("want 2 probes (console + v3), got %d", got)
 	}
 
 	// 冷却期结束（把失败时间戳拨回 10 分钟前）→ 应重新 fetch。
@@ -1067,8 +965,8 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("after cooldown: code=%d", rec.Code)
 	}
-	if calls != 4 {
-		t.Errorf("want 4 probes after cooldown (2 rounds x 2), got %d", calls)
+	if got := calls.Load(); got != 4 {
+		t.Errorf("want 4 probes after cooldown (2 rounds x 2), got %d", got)
 	}
 }
 
