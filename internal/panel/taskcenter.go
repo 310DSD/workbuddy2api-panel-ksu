@@ -231,6 +231,20 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 							one.grow = append(one.grow, t)
 						}
 					}
+					// 合并小程序口径待办（与 tasksScanAll 同口径：mp 列表是默认口径
+					// 超集，按 code 去重；失败静默）。此前此处漏合并——扫描显示
+					// mp 待办而队列报"无可执行待办"。
+					if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
+						seen := map[string]bool{}
+						for _, t := range one.grow {
+							seen[t.TaskCode] = true
+						}
+						for _, t := range mpTasks {
+							if growthPending(t) && !seen[t.TaskCode] {
+								one.grow = append(one.grow, t)
+							}
+						}
+					}
 					sort.Slice(one.grow, func(i, j int) bool { // 按 autoActions 顺序（依赖前置）
 						return autoActionIndex(one.grow[i].TaskCode) < autoActionIndex(one.grow[j].TaskCode)
 					})
