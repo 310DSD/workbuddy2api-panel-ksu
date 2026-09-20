@@ -517,14 +517,24 @@ $('cfgForm').onsubmit = async ev => {
 /* ── 添加账号 ─────────────────────────────────────────────────────── */
 function openAdd() {
   $('addVeil').classList.add('on');
-  // 重置到选域态：选域可见、加载/就绪/完成/错误全收，起始按钮亮起。
+  // 重置到登录标签
+  switchAddTab('login');
   $('addPick').hidden = false;
   $('addLoad').hidden = true; $('addReady').hidden = true;
   $('addDone').hidden = true; $('addErr').hidden = true;
+  $('importDone').hidden = true; $('importErr').hidden = true;
   $('btnCopyUrl').hidden = true; $('btnOpenUrl').hidden = true;
   $('btnStartLogin').hidden = false; $('btnStartLogin').disabled = false;
   stopPoll();
 }
+function switchAddTab(tab) {
+  document.querySelectorAll('#addTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  $('addTabLogin').hidden = tab !== 'login';
+  $('addTabImport').hidden = tab !== 'import';
+}
+document.querySelectorAll('#addTabs .tab').forEach(b => {
+  b.onclick = () => switchAddTab(b.dataset.tab);
+});
 function startAddLogin() {
   const realm = (document.querySelector('input[name="addRealm"]:checked') || {}).value || 'cn';
   $('btnStartLogin').disabled = true;
@@ -569,6 +579,31 @@ $('btnStartLogin').onclick = startAddLogin;
 $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
 $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
+$('importFile').onchange = async () => {
+  const file = $('importFile').files[0];
+  if (!file) return;
+  $('importDone').hidden = true; $('importErr').hidden = true;
+  const fd = new FormData();
+  fd.append('file', file);
+  const h = {};
+  const k = localStorage.getItem(LS_KEY);
+  if (k) h['Authorization'] = 'Bearer ' + k;
+  try {
+    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    $('importDone').hidden = false;
+    $('importDone').textContent = '导入完成：成功 ' + d.imported + ' 个' + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
+    if (d.errors && d.errors.length) {
+      console.warn('import errors:', d.errors);
+    }
+    loadOverview(true);
+  } catch (e) {
+    $('importErr').hidden = false;
+    $('importErr').textContent = '导入失败：' + e.message;
+  }
+  $('importFile').value = '';
+};
 
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */
 $('btnAdd').onclick = openAdd;
