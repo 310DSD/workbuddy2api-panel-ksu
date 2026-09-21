@@ -1,7 +1,7 @@
 id=wb2api_panel
 name=WorkBuddy2API Panel
-version=v1.10.0-ksu
-versionCode=11000
+version=v1.11.1-ksu
+versionCode=11101
 author=linguo2625469 / Operit port
 description=WorkBuddy → OpenAI 兼容网关。开机自启，WebUI 提供浏览器入口（仅 arm64-v8a）。
 webuiIcon=webroot/favicon.svg

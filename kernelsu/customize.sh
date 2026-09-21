@@ -6,7 +6,7 @@ if ! type abort >/dev/null 2>&1; then abort() { ui_print "$1"; exit 1; }; fi
 
 ui_print "******************************"
 ui_print " WorkBuddy2API Panel"
-ui_print " arm64-v8a · v1.10.0 · Go 1.27.1"
+ui_print " arm64-v8a · v1.11.1 · Go 1.27"
 ui_print "******************************"
 
 ABI=$(getprop ro.product.cpu.abi)
@@ -43,7 +43,6 @@ if [ ! -f "$DATADIR/config.json" ]; then
   "api_key": "$KEY",
   "auth_dir": "/data/adb/wb2api/auths",
   "state_file": "/data/adb/wb2api/data/state.json",
-  "server": { "max_body_mb": 8 },
   "cooldown": { "soft_rate": "600s", "soft_rate_max": "2h" },
   "schedule": {
     "checkin_hours": [9, 21],
