@@ -40,6 +40,7 @@ func TestAddAndTotals(t *testing.T) {
 }
 
 // Rollup 把超出 hourlyKeep 的小时桶折叠为日桶，且幂等：重复折叠不重复计数。
+// 窗口口径：24h 窗口不含 100 天前的日桶；hours=0（全部历史）才含日点。
 func TestRollupIdempotent(t *testing.T) {
 	r := New("")
 	old := time.Now().AddDate(0, 0, -100) // 100 天前，超出 90 天小时保留
@@ -49,15 +50,23 @@ func TestRollupIdempotent(t *testing.T) {
 
 	r.Rollup(time.Now())
 	after := r.Snapshot(24, nil)
-	if after.Totals.Requests != 3 || after.Totals.PromptTokens != 15 {
-		t.Fatalf("折叠后 totals = %d/%d, want 3/15", after.Totals.Requests, after.Totals.PromptTokens)
+	if after.Totals.Requests != 1 || after.Totals.PromptTokens != 1 {
+		t.Fatalf("24h 窗口 totals = %d/%d, want 1/1（窗口外日桶不进聚合）", after.Totals.Requests, after.Totals.PromptTokens)
 	}
-	if len(after.Series) != 2 || after.Series[0].Scope != "day" || after.Series[1].Scope != "hour" {
-		t.Fatalf("series = %+v, want 日点在前 + 小时点在后", after.Series)
+	if len(after.Series) != 1 || after.Series[0].Scope != "hour" {
+		t.Fatalf("series = %+v, want 仅当前小时 1 个点", after.Series)
+	}
+
+	all := r.Snapshot(0, nil)
+	if all.Totals.Requests != 3 || all.Totals.PromptTokens != 15 {
+		t.Fatalf("全部历史 totals = %d/%d, want 3/15", all.Totals.Requests, all.Totals.PromptTokens)
+	}
+	if len(all.Series) != 2 || all.Series[0].Scope != "day" || all.Series[1].Scope != "hour" {
+		t.Fatalf("series = %+v, want 日点在前 + 小时点在后", all.Series)
 	}
 
 	r.Rollup(time.Now())
-	again := r.Snapshot(24, nil)
+	again := r.Snapshot(0, nil)
 	if again.Totals.Requests != 3 || again.Totals.PromptTokens != 15 {
 		t.Fatalf("二次折叠后 totals = %d/%d, want 3/15（幂等被破坏）", again.Totals.Requests, again.Totals.PromptTokens)
 	}
@@ -82,18 +91,31 @@ func TestFlushLoadRoundtrip(t *testing.T) {
 	}
 }
 
-// Snapshot 把小时窗口外的细粒度并入日点，时序不出现空洞。
-func TestSnapshotStitching(t *testing.T) {
+// Snapshot 全口径窗口过滤：窗口外的数据不进**任何**聚合（卡片/表格/时序），
+// 切窗口数字随之变化；hours=0 全部历史。Buckets 为窗口内命中的桶数。
+func TestSnapshotWindowFilter(t *testing.T) {
 	r := New("")
 	now := time.Now()
-	r.Add(now.Add(-48*time.Hour), "cn", "u", "m", Delta{PromptTokens: 5, HasPromptTokens: true}, true) // 窗口(24h)外 → 日点
-	r.Add(now, "cn", "u", "m", Delta{PromptTokens: 3, HasPromptTokens: true}, true)                    // 窗口内 → 小时点
+	r.Add(now.Add(-48*time.Hour), "cn", "u", "m", Delta{PromptTokens: 5, HasPromptTokens: true}, true) // 窗口(24h)外
+	r.Add(now, "cn", "u", "m", Delta{PromptTokens: 3, HasPromptTokens: true}, true)                    // 窗口内
 	s := r.Snapshot(24, nil)
-	if len(s.Series) != 2 || s.Series[0].Scope != "day" || s.Series[1].Scope != "hour" {
-		t.Fatalf("series = %+v", s.Series)
+	if s.Totals.Requests != 1 || s.Totals.PromptTokens != 3 {
+		t.Fatalf("24h 窗口 totals = %d/%d, want 1/3（48h 前的数据应被过滤）", s.Totals.Requests, s.Totals.PromptTokens)
 	}
-	if s.Series[0].PromptTokens != 5 || s.Series[1].PromptTokens != 3 {
-		t.Fatalf("series tokens = %d/%d, want 5/3", s.Series[0].PromptTokens, s.Series[1].PromptTokens)
+	if len(s.Series) != 1 || s.Series[0].Scope != "hour" || s.Series[0].PromptTokens != 3 {
+		t.Fatalf("series = %+v, want 仅窗口内 1 个小时点", s.Series)
+	}
+	if s.Buckets != 1 {
+		t.Fatalf("buckets = %d, want 1（窗口内命中桶数）", s.Buckets)
+	}
+
+	all := r.Snapshot(0, nil)
+	if all.Totals.Requests != 2 || all.Totals.PromptTokens != 8 {
+		t.Fatalf("全部历史 totals = %d/%d, want 2/8", all.Totals.Requests, all.Totals.PromptTokens)
+	}
+	// since 是全库数据起点，不受窗口影响。
+	if all.Since == "" || s.Since != all.Since {
+		t.Fatalf("since 应为全库起点且不随窗口变化: all=%q windowed=%q", all.Since, s.Since)
 	}
 }
 

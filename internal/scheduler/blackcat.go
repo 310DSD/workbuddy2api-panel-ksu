@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
@@ -21,7 +22,7 @@ func (s *Scheduler) RunBlackcatNow() {
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
-		if a == nil || a.AccessToken == "" {
+		if a == nil || a.AccessTokenValue() == "" {
 			continue
 		}
 		if a.IsGlobal() {
@@ -29,7 +30,7 @@ func (s *Scheduler) RunBlackcatNow() {
 		}
 		need, err := s.cfg.Upstream.BlackcatNeed(a)
 		if err != nil {
-			log.Printf("blackcat %s: %v", a.UID, err)
+			log.Printf("blackcat %s: %v", logfmt.Label(a.UID, a.Nickname), err)
 			continue
 		}
 		if need <= 0 {
@@ -37,10 +38,10 @@ func (s *Scheduler) RunBlackcatNow() {
 		}
 		ok, err := s.cfg.Upstream.RunNightChats(a, int(need))
 		if err != nil {
-			log.Printf("blackcat %s: %d/%d 完成，中断: %v", a.UID, ok, need, err)
+			log.Printf("blackcat %s: %d/%d 完成，中断: %v", logfmt.Label(a.UID, a.Nickname), ok, need, err)
 			continue
 		}
-		log.Printf("blackcat %s: 完成 %d 次夜间对话", a.UID, ok)
+		log.Printf("blackcat %s: 完成 %d 次夜间对话", logfmt.Label(a.UID, a.Nickname), ok)
 		time.Sleep(activityAccountDelay)
 	}
 }

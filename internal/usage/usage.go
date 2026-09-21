@@ -380,14 +380,23 @@ type Snapshot struct {
 	Generated string     `json:"generated"`
 }
 
-// Snapshot 聚合当前全部桶。hours 控制时序返回多少个小时点（其余按日折叠）。
+// Snapshot 聚合**所选窗口内**的桶，产出面板一次拉取的全部用量视图数据。
+//
+// hours>0：窗口 = [当前整点-(hours-1)小时, now]，卡片汇总/按域/按账号/按模型/
+// 时序**全部**按同一窗口口径统计——切窗口时所有数字随之变化（曾长期是"卡片为
+// 全部历史累计、hours 只改时序分片"的口径，界面上被读成"筛选没生效"，已废弃）。
+// 小时桶按整点入窗；日桶（Rollup 折叠出的长期数据）按日起点入窗，故小时窗口
+// 天然不含更早的日桶。
+// hours<=0：全部历史（含已折叠日桶），供「全部历史」选项看长期趋势。
+//
 // nicks 是 uid→昵称映射，仅用于展示。
 func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	if r == nil {
 		return Snapshot{Generated: time.Now().Format(time.RFC3339)}
 	}
-	if hours <= 0 || hours > 24*60 {
-		hours = 72
+	windowed := hours > 0
+	if windowed && hours > 24*60 {
+		hours = 24 * 60
 	}
 
 	r.mu.Lock()
@@ -405,11 +414,35 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	hourSeries := map[string]*aggAcc{}
 	daySeries := map[string]*aggAcc{}
 
-	nowHour := time.Now().Truncate(time.Hour)
-	hourFrom := nowHour.Add(-time.Duration(hours-1) * time.Hour)
+	var hourFrom time.Time
+	if windowed {
+		nowHour := time.Now().Truncate(time.Hour)
+		hourFrom = nowHour.Add(-time.Duration(hours-1) * time.Hour)
+	}
 
+	// 数据起点（全库最早分片）：不受窗口影响，表示"记录自何时开始"。scope 字典序
+	// 即时间序（同前缀内同格式排序；"d:" 恒早于 "h:"——日桶只来自 90 天前的小时折叠）。
+	since := ""
+	matched := 0
 	for i := range bs {
 		b := &bs[i]
+		if b.Scope < since || since == "" {
+			since = b.Scope
+		}
+		if windowed {
+			var ts time.Time
+			var err error
+			if strings.HasPrefix(b.Scope, "h:") {
+				ts, err = time.ParseInLocation(hourLayout, strings.TrimPrefix(b.Scope, "h:"), time.Local)
+			} else {
+				ts, err = time.ParseInLocation(dayLayout, strings.TrimPrefix(b.Scope, "d:"), time.Local)
+			}
+			// 解析失败的脏桶不进窗口聚合（也不该出现在任何口径里）。
+			if err != nil || ts.Before(hourFrom) {
+				continue
+			}
+		}
+		matched++
 		total.add(b)
 
 		if realmAgg[b.Realm] == nil {
@@ -432,27 +465,14 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 		}
 		modelAgg[b.Model].add(b)
 
-		scope := strings.TrimPrefix(b.Scope, "h:")
-		isHour := strings.HasPrefix(b.Scope, "h:")
-		if isHour {
-			ts, err := time.ParseInLocation(hourLayout, scope, time.Local)
-			if err != nil {
-				continue
+		if strings.HasPrefix(b.Scope, "h:") {
+			scope := strings.TrimPrefix(b.Scope, "h:")
+			if hourSeries[scope] == nil {
+				hourSeries[scope] = &aggAcc{}
 			}
-			if !ts.Before(hourFrom) {
-				if hourSeries[scope] == nil {
-					hourSeries[scope] = &aggAcc{}
-				}
-				hourSeries[scope].add(b)
-			} else {
-				// 超出小时窗口的细粒度数据并入其所在日，避免时序出现空洞。
-				d := ts.Format(dayLayout)
-				if daySeries[d] == nil {
-					daySeries[d] = &aggAcc{}
-				}
-				daySeries[d].add(b)
-			}
+			hourSeries[scope].add(b)
 		} else {
+			scope := strings.TrimPrefix(b.Scope, "d:")
 			if daySeries[scope] == nil {
 				daySeries[scope] = &aggAcc{}
 			}
@@ -467,7 +487,7 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 			return k, nicks[k]
 		}),
 		ByModel:   keyed(modelAgg, func(k string) (string, string) { return k, "" }),
-		Buckets:   len(bs),
+		Buckets:   matched,
 		Generated: time.Now().Format(time.RFC3339),
 	}
 	for i := range snap.ByAccount {
@@ -497,10 +517,9 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 			snap.FileBytes = fi.Size()
 		}
 	}
-	// 最早的分片即数据起点。
-	if len(snap.Series) > 0 {
-		snap.Since = snap.Series[0].T
-	}
+	// since 去掉 scope 前缀（"h:2026-09-16T13" → "2026-09-16T13"）给前端展示；
+	// 无任何桶时保持空（无数据不伪造起点）。
+	snap.Since = strings.TrimPrefix(strings.TrimPrefix(since, "h:"), "d:")
 	return snap
 }
 

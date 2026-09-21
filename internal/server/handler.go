@@ -5,19 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
 
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
@@ -31,9 +30,6 @@ type Config struct {
 	Upstream  *upstream.Client
 	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
 	MaxRotate int    // 单请求最多换号次数，默认 3
-	// MaxBodyBytes 聊天请求体大小上限；<=0 兜底 8<<20（8MB）。
-	// 超限直接 413 request_body_too_large（不再静默截断喂给上游，issue #41）。
-	MaxBodyBytes int64
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -109,19 +105,6 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
-	// maxBodyBytes 请求体上限的运行期值（cfg.MaxBodyBytes 的原子镜像）。
-	// 面板在线改 server.max_body_mb 时经 SetMaxBodyBytes 热生效，无需重启
-	// （issue #17：改了配置却静默不生效，用户仍被 8MB 413 拦截）。
-	maxBodyBytes atomic.Int64
-}
-
-// SetMaxBodyBytes 热更新请求体上限（面板保存配置路径调用）。
-// n<=0 与 NewHandler 兜底口径一致：回落 8MB。
-func (h *Handler) SetMaxBodyBytes(n int64) {
-	if n <= 0 {
-		n = 8 << 20
-	}
-	h.maxBodyBytes.Store(n)
 }
 
 // NewHandler 构建 handler。
@@ -138,11 +121,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	if cfg.MaxBodyBytes <= 0 {
-		cfg.MaxBodyBytes = 8 << 20 // 请求体上限兜底 8MB
-	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
-	h.maxBodyBytes.Store(cfg.MaxBodyBytes)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -201,6 +180,10 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	if redisMode == "" {
 		redisMode = "noop"
 	}
+	// cost_explore 探索台账（issue #136 §5 可观测性）：累计探索事件数 + 各
+	// (域, 模型) 的最近探索时刻（键 "realm|model"）。与 accounts[].model_costs
+	// 行对照即可读出「探索→毕业」全链路（单一事实来源，不做双表示）。零回归只增键。
+	exploreEvents, exploreLast := h.cfg.Pool.CostExploreStatus()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts":       h.cfg.Pool.List(),
 		"total":          total,
@@ -216,6 +199,11 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		},
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
+		// cost_explore 事件与 per-model 时间戳（时间值由 encoding/json 写 RFC3339）。
+		"cost_explore": map[string]any{
+			"events_total": exploreEvents,
+			"per_model":    exploreLast,
+		},
 	})
 }
 
@@ -469,19 +457,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
 	clientIP := upstream.ExtractClientIP(r)
-	// 请求体上限：LimitReader 读 limit+1 以探测"超限"（读到 limit+1 字节即已超），
-	// 超限直接 413，不把截断的半截 JSON 喂给上游（issue #41：截断 body 让上游
-	// unmarshal 报 unexpected EOF，网关却罚号轮空）。
-	// 413 是网关侧的客户端问题，不打上游、不罚账号、不轮转。
-	limit := h.maxBodyBytes.Load()
-	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	// 请求体无大小上限（max_body_mb 已移除，对齐上游）：完整读入，超限类问题交由
+	// 上游自然返回错误（其响应经既有错误分类链路透出，信息量更大）。#41 的截断
+	// 防御语义保留在读错误路径——移除预拦截后，截断只可能来自客户端自己断流，
+	// 读 body 出错就地 400，不把半截 JSON 喂上游 unmarshal 报 unexpected EOF 冤枉罚号。
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
-		return
-	}
-	if int64(len(body)) > limit {
-		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_body_too_large",
-			fmt.Sprintf("请求体超过 %d MB 上限：多图/长上下文会话易触发（历史图片每轮以 base64 重发）；请压缩图片或调大 server.max_body_mb（面板修改即时生效）后重试", limit>>20))
 		return
 	}
 	var peek struct {
@@ -515,15 +497,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 轮级兜底聚合键：无会话键的客户端（OpenAI 兼容协议——dsh / Codex / Cherry
-	// Studio 等请求体里既无 conversationId 也无 metadata）sessKey 恒空，会话头族的
-	// 聚合主键只能逐请求新生成，agent 多轮在上游用量明细里仍是一条请求一条记录。
-	// 这里按 body 里最后一条 user 消息派生轮级键（同轮内所有上游调用同键）。
+	// 轮级聚合键：按 body 里最后一条 user 消息派生（同轮内所有上游调用同键，
+	// 换 user 消息换键）。#170 起带会话键的客户端也统一走轮级（对齐官方桌面 CLI
+	// 的 X-Conversation-Request-ID 轮级语义——TraceStartHook 每次 USER_PROMPT_SUBMIT
+	// 清空重生成），故不再限 sessKey=="" 才计算；sessKey 由下方派生处以复合键方式
+	// 入键（防不同会话同轮文本互撞）。
 	// 必须在下方 prompt.Rewrite 之前取——改写会动 messages 内容，之后取会让键漂移。
-	turnKey := ""
-	if sessKey == "" {
-		turnKey = session.TurnKey(body)
-	}
+	turnKey := session.TurnKey(body)
 
 	// gateway_hint 判定所需的请求形态（image_url part）：在改写前取（与 turnKey
 	// 同理）。11133「模型不支持图片」指向的前提。
@@ -597,12 +577,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 系统提示词改写（出站前、轮转前；每个请求一次）。
 	//   - custom：用自有提示词替换客户端 system/developer（从源头消灭 system 指纹误报）。
+	//   - append：开头连续 system/developer 块后插自有提示词，既有消息逐字不动
+	//     （客户端项目规范/工具约定与网关提示词并用，issue #129）。
 	//   - passthrough + 降级期：换 Degraded 中性提示词直达，不再先撞 400。
-	//   - passthrough 非降级期：透传客户端原始 system（不改写）。
+	//   - passthrough / append 非降级期：透传客户端原始 system（append 则再插一条网关 system）。
+	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
+	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
 	degradedApplied := false
 	if h.cfg.PromptMode == "custom" && h.cfg.PromptText != "" {
 		body = prompt.Rewrite(body, h.cfg.PromptText)
-	} else if h.cfg.PromptMode == "passthrough" && h.degrade.Active() {
+	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active() {
+		body = prompt.Append(body, h.cfg.PromptText)
+	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active() {
 		body = prompt.Rewrite(body, prompt.Degraded)
 		degradedApplied = true
 	}
@@ -626,12 +612,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body)}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
+	} else if turnKey != "" && sessKey != "" {
+		// 轮级复合键：sessKey 入键防跨会话同轮文本互撞（#170 统一轮级）。
+		chatMeta.ConversationRequestID = session.TurnRequestID(sessKey + ":" + turnKey)
+	} else if turnKey != "" {
+		// 无会话键客户端：纯轮级键（既有兜底语义不变，存量会话键值零漂移）。
+		chatMeta.ConversationRequestID = session.TurnRequestID(turnKey)
 	} else if sessKey != "" {
+		// 残留空态兜底（无 user 消息/无可签名内容）：会话级聚合，好于请求级随机。
 		chatMeta.ConversationRequestID = session.RequestIDForKey(sessKey)
 	} else {
-		// 无会话键客户端：轮级兜底——同轮内 tool call 多轮 / 换号重试 / 降级重发
-		// 共享同键，用户发下一条消息自动换键。
-		chatMeta.ConversationRequestID = session.TurnRequestID(turnKey)
+		// 无会话键也无轮级键：请求级随机（轮转内捕获一次即共享）。
+		chatMeta.ConversationRequestID = session.TurnRequestID("")
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
@@ -657,6 +649,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		st.uid = acct.UID
+		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
+		st.nick = acct.Nickname
 		tried[acct.UID] = true
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
@@ -692,7 +686,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := acct.SaveAtomic(); err != nil {
 				// 刷新成功但落盘失败：下次启动会用旧 token，必须暴露
-				log.Printf("chat refresh uid=%s: save auth failed: %v", acct.UID, err)
+				log.Printf("ERR: [server] chat refresh acct=%s: save auth failed: %v", logfmt.Label(acct.UID, acct.Nickname), err)
 			}
 		}
 
@@ -731,11 +725,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				kind = upstream.Classify(status, string(respBody))
 				uerr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			}
-			// 内容拦截误报（passthrough 模式首遇）：判定为 system 指纹误报，
-			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试。
+			// 内容拦截误报（passthrough/append 模式首遇）：判定为 system 指纹误报，
+			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试（append
+			// 降级重试同样退化为 replace——原文在场只会确定性再撞 400）。
 			// 第二次仍被拦（用户内容本身触发审核）→ 回内容防火墙错误（见下分支）。
 			// 内容问题非账号问题：applyErrorPolicy 不罚账号（见 ErrContentBlocked 分支）。
-			if kind == upstream.ErrContentBlocked && h.cfg.PromptMode == "passthrough" && !degradedApplied {
+			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !degradedApplied {
 				h.degrade.Trigger()
 				body = prompt.Rewrite(body, prompt.Degraded)
 				degradedApplied = true
@@ -808,12 +803,27 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
 			// hint 字段（hintFn 惰性求值——正常流零开销，只有真撞到 error 帧才
 			// 组装请求上下文做判定）。
-			_ = upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
+			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
 			}))
+			if upstream.IsEmptyStreamError(sErr) {
+				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
+				// 兜底（HTTP 头已发出只能 200），但这是上游缺陷不是成功——日志/
+				// 状态收敛到 502 观测，与非流式 Aggregate 空流→502 upstream_parse
+				// 同语义（此前 `_ =` 吞错把失败流记成 200，运维看到假成功）。
+				// 只认 IsEmptyStreamError：客户端断连的写失败不误标（人已走，
+				// 502 观测没有意义）。
+				st.status = http.StatusBadGateway
+				log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (200+0 frames)", logfmt.Label(acct.UID, acct.Nickname), bareModel)
+			}
 			recordAttempt(acct.UID, stats.Usage(), attemptStarted)
 			st.ttfb = stats.TTFB()
-			st.toks, _ = stats.Tokens()
+			// usage 缺失时保留 chatStat.toks 的 -1 哨兵（观测缺失 → 显示 "-"），
+			// 不写入零值——否则「没观测到 usage」被伪造成「测得 0 token」，
+			// 与非流式走 completionTokens 返回 -1 的口径不一致。
+			if toks, hasUsage := stats.Tokens(); hasUsage {
+				st.toks = toks
+			}
 			// 成本账本：末帧 usage 带 credit 与 token 总数时记录实测单价，
 			// 供下次选号把免费/便宜的号排在前面。
 			if credit, ok := stats.Credit(); ok {
@@ -1019,7 +1029,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// chatCompletions 已直接透传原文返回不轮转——该分支只为文档完备。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
-		// 有问题（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。换了账号照样 400，
+		// 有问题（网关侧不再截断，均为客户端畸形 JSON）。换了账号照样 400，
 		// 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇）；但**仍然轮转**
 		// ——不同账号可能有不同的模型权限，值得换号再试一次。
 	case upstream.ErrModelBlocked:
