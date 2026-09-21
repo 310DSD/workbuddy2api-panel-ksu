@@ -1262,14 +1262,15 @@ function renderUsage(d) {
     usStat(t.errors ? String(t.errors) : '0', '失败尝试', t.errors ? 'warn' : '') +
     usStat(fmtMs(t.avg_latency_ms), '平均延迟');
 
-  // 卡片与表格给的是**全部历史**的累计值，只有下面的时序图按所选窗口展示。
-  //
-  // 这是后端的既定口径（Snapshot 的注释：「聚合当前全部桶。hours 控制时序返回
-  // 多少个小时点」），不是缺陷——但界面上不写明，切 24 小时 / 30 天时这几个数字
-  // 纹丝不动，就会被读成「没生效」。所以把口径差异直接写在标题栏。
-  $('usNote').textContent = '卡片为累计值（自启用起，不随窗口变化）· ' +
+  // 卡片、三张表与时序图全部按所选窗口统计（切窗口数字随之变化）；
+  // 「全部历史」含 90 天前折叠出的日桶。这里标注当前口径与数据起点。
+  const winLabel = ($('usWindow') && $('usWindow').selectedOptions[0]) ?
+    $('usWindow').selectedOptions[0].textContent.trim() : '';
+  $('usNote').textContent =
+    (winLabel ? winLabel + ' · ' : '') +
     (d.buckets || 0) + ' 个分桶' +
-    (d.file_bytes ? ' · ' + (d.file_bytes / 1024).toFixed(1) + ' KB' : '');
+    (d.since ? ' · 数据自 ' + d.since.replace('T', ' ') : '') +
+    (d.file_bytes ? ' · 文件 ' + (d.file_bytes / 1024).toFixed(1) + ' KB' : '');
 
   $('usAccBody').innerHTML = (d.by_account || []).map(x =>
     usRow(x.key.slice(0, 8), x.extra || '', x,
