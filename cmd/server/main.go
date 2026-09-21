@@ -375,10 +375,12 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 			writeErr = f.Sync()
 		}
 		closeErr := f.Close()
-		_ = os.Remove(tmp)
+		// 写失败时保留 tmp（挂载文件已被 O_TRUNC 破坏，tmp 里是完整新内容，
+		// 可手工恢复）；写成功才清理。
 		if writeErr != nil {
-			return nil, fmt.Errorf("replace config (bind mount fallback): %w", writeErr)
+			return nil, fmt.Errorf("replace config (bind mount fallback, 完整新内容保留在 %s): %w", tmp, writeErr)
 		}
+		_ = os.Remove(tmp)
 		if closeErr != nil {
 			return nil, fmt.Errorf("replace config (bind mount fallback): %w", closeErr)
 		}
