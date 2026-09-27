@@ -408,3 +408,26 @@ func TestRunBalanceRefreshNowUpdatesCreditsAndRevives(t *testing.T) {
 		t.Errorf("u2 must stay disabled")
 	}
 }
+
+// TestNextWakeGrowthSlot growth 排程进候选 + 禁用退场（每日自动执行成长任务队列）。
+func TestNextWakeGrowthSlot(t *testing.T) {
+	s := New(Config{GrowthHours: []int{1}})
+	at, kinds := s.nextWake(time.Date(2026, 9, 27, 0, 10, 0, 0, time.Local))
+	hasGrowth := false
+	for _, k := range kinds {
+		if k == taskGrowth {
+			hasGrowth = true
+		}
+	}
+	if !hasGrowth || at.Hour() != 1 || at.Day() != 27 {
+		t.Fatalf("growth 槽位: at=%v kinds=%v（期望 09-27 01:00 含 taskGrowth）", at, kinds)
+	}
+	// 禁用后不进候选（其余 kind 为空 → nextWake 零值返回）
+	s2 := New(Config{GrowthHours: []int{1}, GrowthDisabled: true})
+	_, kinds2 := s2.nextWake(time.Date(2026, 9, 27, 0, 10, 0, 0, time.Local))
+	for _, k := range kinds2 {
+		if k == taskGrowth {
+			t.Fatal("禁用后 growth 仍在候选")
+		}
+	}
+}
