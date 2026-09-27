@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white&style=flat-square">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.27.1-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
   <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Single_Binary%20%7C%20Docker-2496ED?style=flat-square">
   <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
@@ -173,6 +173,16 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 存储 / 运维 | Docker bind mount 单文件保存回退（rename EBUSY → 原地写，失败保留 tmp）；Redis 快照在本地 state.json 缺失时接管恢复；成本探索窗口 `pool.cost_explore_interval` |
 | 底层修复 | SSE 聚合、thinking 回填、global 单路径、429 英文文案、唤醒宽限、session 四连修 |
 
+**第四轮（`ab9a162` v1.11.1 → `bc4dc33` v1.11.7，2026-09-27，合并入 fork）**：
+
+| 上游改动 | 吸收内容 |
+|---|---|
+| 任务体系 | 成长任务队列每日自动执行（growth 排程）；吸收 mp 任务 `Sequential_Tasks_2/3`（+500c+10e/账号）；预留 4..7 环；待办扫描过滤上游锁定任务 |
+| 面板修复 | 修 v1.11.3 任务中心 JS 崩溃（`pollQueueOnce` 残留、`reattachQueueView` TDZ 崩溃）+ JS 运行时冒烟测试；模型倍率列显示优惠生效价 |
+| 上游协议 | 14018 硬积分 / `image_url` 兼容 / 11135 空白容差；积分包到期字段 `CycleEndTime`；缓存命中 usage 兼容字段；`/v3/config` 双 UA 并发取并集 + `ModelTrialBanner` 免费试用模型 |
+| 池 / 网关 | `/v1/models` 选号对齐面板 CN 口径（缓存缩至 10min）；余额刷新解冻只清 `CoolHard`（不误清 6004 模型台账与软限流冷却） |
+| 主动下线 | 开学季活动结束（9/24），下线任务功能、移除 `internal/scheduler/school.go`，保留券码查询 |
+
 未吸收（明确不做）：脚本体系（task_runner/school 脚本—我们已有更完整的纯 API 实现）、governance/CI workflow、成本账本选号（依赖 usage.credit 观测，收益待验证）。
 
 ### 未做 / 待办
@@ -215,7 +225,7 @@ flowchart LR
 - **Docker + Docker Compose**（服务端部署方式，镜像内已含低权限用户与全部工具脚本）——或
 - **Windows / macOS / Linux 直接跑单文件二进制**（无需 Docker，见下方「Windows 单文件运行」）
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
-- 宿主机 Go ≥ 1.27（仅从源码构建时需要；`go.mod` 要求 `go 1.27.0`）
+- 宿主机 Go ≥ 1.27.1（仅从源码构建时需要；`go.mod` 要求 `go 1.27.1`）
 
 ### 方式一：Docker Compose（推荐服务器部署）
 
@@ -627,7 +637,7 @@ http://127.0.0.1:7863/panel/
 
 ### Docker 镜像
 
-多阶段镜像（`golang:1.23-alpine` 构建，`go.mod` 声明 `go 1.27.0`，构建时由 Go 工具链自动切换并下载对应版本 → `alpine:3.20` 运行）一次编译全部四个二进制并随镜像分发：
+多阶段镜像（`golang:1.27.1-alpine` 构建，与 `go.mod` 声明的 `go 1.27.1` 一致 → `alpine:3.20` 运行）一次编译全部四个二进制并随镜像分发：
 
 - **wb2api**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `scripts/probe_active.py`）
 - 以 `app` 用户（uid 10001）运行，`app/auths` 与 `app/data` 预建

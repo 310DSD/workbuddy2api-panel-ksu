@@ -6,7 +6,7 @@ if ! type abort >/dev/null 2>&1; then abort() { ui_print "$1"; exit 1; }; fi
 
 ui_print "******************************"
 ui_print " WorkBuddy2API Panel"
-ui_print " arm64-v8a · v1.11.1 · Go 1.27"
+ui_print " arm64-v8a · v1.11.7 · Go 1.27.1"
 ui_print "******************************"
 
 ABI=$(getprop ro.product.cpu.abi)
