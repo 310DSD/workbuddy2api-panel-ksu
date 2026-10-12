@@ -1,6 +1,6 @@
 module github.com/linguo2625469/workbuddy2api-panel
 
-go 1.27.1
+go 1.27.2
 
 require github.com/redis/go-redis/v9 v9.23.0
 

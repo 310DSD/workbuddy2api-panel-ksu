@@ -8,7 +8,7 @@
 
 - 根目录：Go 网关源码（`cmd/` `internal/` `go.mod` 等）
 - `kernelsu/`：KernelSU 模块工程（不含预编译二进制）
-- 版本：`1.13.0-ksu`，Go 1.27.1 交叉编译目标 android/arm64
+- 版本：`1.13.0-ksu`，Go 1.27.2 交叉编译目标 android/arm64
 
 ## 本 fork 相对上游的增量
 
@@ -22,6 +22,8 @@
 ## 构建模块二进制
 
 ```sh
-export CGO_ENABLED=0 GOOS=android GOARCH=arm64 GOTOOLCHAIN=local
+# GOTOOLCHAIN=auto：本地 Go 低于 go.mod 要求时自动下载对应工具链
+# （proxy.golang.org 不可达时设 GOPROXY=https://goproxy.cn,direct 兜底）
+export CGO_ENABLED=0 GOOS=android GOARCH=arm64 GOTOOLCHAIN=auto
 go build -trimpath -ldflags='-s -w -buildid=' -o kernelsu/bin/wb2api ./cmd/server
 ```
