@@ -3,6 +3,18 @@
   "api_key": "test_key",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
+  "server": {
+    "read_timeout": "300s"
+  },
+  "panel": {
+    "package_detail_limit": 5
+  },
+  "logging": {
+    "request_archive_enabled": true,
+    "request_retention_days": 7,
+    "request_archive_max_mb": 100,
+    "request_client_info": true
+  },
   "cooldown": {
     "soft_rate": "600s",
     "soft_rate_max": "2h"
@@ -21,7 +33,8 @@
     "keepalive_enabled": true,
     "blackcat_enabled": true,
     "balance_refresh_enabled": true,
-    "balance_refresh_minutes": 5
+    "balance_refresh_minutes": 5,
+    "include_disabled_in_tasks": false
   },
   "global": {
     "enabled": true,
@@ -62,8 +75,10 @@
     "degrade_cooldown_max": "2h",
     "idle_weight_per_hour": 0.5,
     "idle_weight_max": 5.0,
+    "prefer_expiring": true,
     "expiring_soon": "168h",
-    "cost_explore_interval": "30m"
+    "cost_explore_interval": "30m",
+    "credit_floor": 100
   },
   "session_sticky": {
     "enabled": true,

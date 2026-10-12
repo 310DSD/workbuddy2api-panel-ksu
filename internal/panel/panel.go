@@ -21,9 +21,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
@@ -56,6 +58,8 @@ type Config struct {
 
 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
 	Usage *usage.Recorder
+	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
+	RequestLog *reqlog.Recorder
 
 	// ProbeFile 模型输出上限探测结果文件（scripts/probe_max_tokens.py --panel-out
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
@@ -147,6 +151,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
+	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
+	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
 	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
@@ -154,6 +160,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountPause))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.withAuth(p.accountResume))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.withAuth(p.accountRemove))
@@ -208,13 +216,23 @@ func (p *Panel) apiKey() string {
 	return p.cfg.APIKey
 }
 
+// expiringSoonWindow 返回调度器当前生效的快过期路由窗口；测试面板无调度器时返回 0。
+func (p *Panel) expiringSoonWindow() time.Duration {
+	if p.cfg.Scheduler == nil {
+		return 0
+	}
+	return p.cfg.Scheduler.ExpiringSoonWindow()
+}
+
 // ---------------------------------------------------------------------------
 // 只读接口
 // ---------------------------------------------------------------------------
 
 // overview 总览：池计数 + 每账号状态 + 面板元信息。
 func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
-	total, healthy, cooling, disabled, inFlightFull := p.cfg.Pool.CountsDetailed()
+	// 用 WithPaused 而不是 CountsDetailed：后者把暂停号并进 disabled（/status 的
+	// 「不可用」口径），而概况卡片要分开展示（issue #125）。
+	total, healthy, cooling, disabled, paused, inFlightFull := p.cfg.Pool.CountsDetailedWithPaused()
 	sticky := 0
 	if p.cfg.StickyCount != nil {
 		sticky = p.cfg.StickyCount()
@@ -229,14 +247,67 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"healthy":         healthy,
 		"cooling":         cooling,
 		"disabled":        disabled,
+		"paused":          paused,
 		"in_flight_full":  inFlightFull,
 		"accounts":        p.cfg.Pool.List(),
+		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
+		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
+		"model_locks": p.cfg.Pool.ModelLockView(),
 	})
 }
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot()})
+}
+
+// requestMetrics 返回进程内请求指标、最近 100 条与归档状态。
+func (p *Panel) requestMetrics(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.RequestLog == nil {
+		writeErr(w, http.StatusNotImplemented, "request logger not available")
+		return
+	}
+	writeJSON(w, http.StatusOK, p.cfg.RequestLog.Snapshot())
+}
+
+// requestLogs 从 JSONL 归档读取最近请求；limit 默认 200、最大 1000。
+// 支持按 outcome/account/model/client_ip/user_agent 过滤（字符串字段为包含匹配）
+// 与 from/to 时间区间（闭区间，unix 秒或 RFC3339）——面板「运行日志」的筛选框、
+// 来源查询与「今天 / 自定义区间」都走这里。
+func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.RequestLog == nil {
+		writeErr(w, http.StatusNotImplemented, "request logger not available")
+		return
+	}
+	limit := 200
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	q := r.URL.Query()
+	rows, err := p.cfg.RequestLog.ReadArchive(limit, reqlog.Filter{
+		Outcome:   q.Get("outcome"),
+		Account:   q.Get("account"),
+		Model:     q.Get("model"),
+		ClientIP:  q.Get("client_ip"),
+		UserAgent: q.Get("user_agent"),
+		From:      parseTimeParam(q.Get("from")),
+		To:        parseTimeParam(q.Get("to")),
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// 空结果回 []（而不是 JSON null）：前端把 null 与"归档关闭"混在一起会走错分支，
+	// 显示成不满足筛选条件的最近请求。
+	if rows == nil {
+		rows = []reqlog.Event{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": rows, "limit": limit})
 }
 
 // models 实时查询上游模型列表与 reasoning 实际档位（直连上游，不读路由层 1h 缓存）：
@@ -411,6 +482,30 @@ func (p *Panel) accountDisable(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// accountPause 暂停选号：账号退出选号候选，但**照常参与**签到 / 活跃上报 / 保活 /
+// 余额刷新。与 disable 的区别：不写 reason、不清冷却域、不重置计数——账号是「临时
+// 让位」而非「判死」，点「恢复选号」即可立刻回到池子（无需重登或解冻）。
+func (p *Panel) accountPause(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	if !p.cfg.Pool.Pause(uid) {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	log.Printf("panel: pause uid=%s（暂停选号，保号任务照常）", uid)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// accountResume 解除暂停选号（幂等，对未暂停账号为空操作）。
+func (p *Panel) accountResume(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	if !p.cfg.Pool.Resume(uid) {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	log.Printf("panel: resume uid=%s（恢复参与选号）", uid)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 // accountCheckin 单号签到：DailyCheckin + 余额查询解冻（已签到等业务错误不阻塞余额刷新），
 // 与 scheduler.RunCheckinNow 的单号语义一致。
 func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
@@ -421,27 +516,45 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	checkinMsg := ""
-	if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
+	checkinDone := false
+	// 企业版无签到体系（上游 400 code 10001「企业账号不支持该操作」）：不发起该调用，
+	// 端点退化为「刷新额度」——企业额度走 get-enterprise-user-usage 口径（见 upstream）。
+	// 前端对企业号不渲染「签到」按钮；此处是 API 侧防御（外部脚本/旧缓存前端仍可能调用）。
+	if a.IsEnterprise() {
+		checkinMsg = "企业账号无签到体系（已跳过签到，仅刷新额度）"
+	} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 		checkinMsg = err.Error() // "今天已签到"等业务错误照常查余额
+		// 幂等拒绝同样是「今日已签」，标记后按钮显示「已签」。
+		if upstream.IsAlreadyCheckin(err) {
+			p.cfg.Pool.NoteCheckinDone(uid)
+			checkinDone = true
+		}
+	} else {
+		p.cfg.Pool.NoteCheckinDone(uid)
+		checkinDone = true
 	}
-	resp := map[string]any{"ok": true}
+	resp := map[string]any{"ok": true, "checkin_done": checkinDone}
+	if a.IsEnterprise() {
+		resp["enterprise"] = true
+	}
 	if checkinMsg != "" {
 		resp["checkin_message"] = checkinMsg
 	}
-	remain, total, err := p.cfg.Upstream.UserResource(a)
+	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
 	if err != nil {
 		resp["balance_error"] = err.Error()
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 	p.cfg.Pool.ReenableIfCredits(uid, remain, total)
+	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
 	resp["credits"] = remain
 	resp["credits_total"] = total
 	log.Printf("panel: checkin uid=%s msg=%q credits=%d/%d", uid, checkinMsg, remain, total)
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// accountBalance 单号余额刷新：UserResource → SetCredits（不触碰冷却状态）。
+// accountBalance 单号余额刷新：更新余额与到期快照，不触碰冷却状态。
 func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.cfg.Pool.AuthByUID(uid)
@@ -449,12 +562,12 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
-	remain, total, err := p.cfg.Upstream.UserResource(a)
+	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "user resource: "+err.Error())
 		return
 	}
-	p.cfg.Pool.SetCredits(uid, remain, total)
+	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": total})
 }
 
@@ -538,30 +651,95 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.cfg.Scheduler.RunBalanceRefreshNow()
+	p.syncNicknames()
 	log.Printf("panel: 手动全量余额刷新完成")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.cfg.Pool.List()})
+}
+
+// syncNicknames 手动刷新时的昵称同步（issue #94：上游改名免重登）。
+// 只在面板手动「刷新」路径调用——后台余额定时器不触发（用户明确要求资料接口
+// 仅手动触达）。逐号拉 /console/account，只取 nickname（手机号等敏感字段在
+// upstream.FetchAccountProfile 内即被丢弃）；单号失败静默跳过，不打断余额刷新
+// 的既有结果。
+func (p *Panel) syncNicknames() {
+	type job struct {
+		uid string
+		a   *auth.Auth
+	}
+	var jobs []job
+	for _, st := range p.cfg.Pool.List() {
+		if st.Disabled {
+			continue
+		}
+		if a := p.cfg.Pool.AuthByUID(st.UID); a != nil && a.AccessTokenValue() != "" {
+			jobs = append(jobs, job{uid: st.UID, a: a})
+		}
+	}
+	if len(jobs) == 0 {
+		return
+	}
+	var (
+		mu      sync.Mutex
+		updated int
+		failed  int
+		sem     = make(chan struct{}, 3)
+		wg      sync.WaitGroup
+	)
+	for _, j := range jobs {
+		wg.Add(1)
+		go func(j job) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			nick, err := p.cfg.Upstream.FetchAccountProfile(j.a)
+			if err != nil {
+				mu.Lock()
+				failed++
+				mu.Unlock()
+				return
+			}
+			if p.cfg.Pool.SetNickname(j.uid, nick) {
+				mu.Lock()
+				updated++
+				mu.Unlock()
+			}
+		}(j)
+	}
+	wg.Wait()
+	if updated > 0 || failed > 0 {
+		log.Printf("panel: 昵称同步：更新 %d 个，失败 %d 个（未变化不计数）", updated, failed)
+	}
 }
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
-// usage 返回逐请求用量聚合。hours 查询参数控制统计窗口（默认 72，上限 1440=60
-// 天）：卡片汇总/按域/按账号/按模型/时序**全部**按该窗口统计。显式 hours=0 表示
-// 全部历史（含 90 天前折叠出的日桶，看长期趋势）。
+// usage 返回逐请求用量聚合。统计窗口三选一：
+//   - from/to（unix 秒）：显式区间，用于「今天」与「自定义」——区间由浏览器按
+//     本地时区算好再发，服务端时区与浏览器不一致时「今天」才不会被算错；
+//   - hours：滚动窗口（默认 72，上限 1440=60 天），卡片汇总/按域/按账号/按模型/
+//     时序**全部**按该窗口统计；显式 hours=0 表示全部历史（含 90 天前折叠出的日桶）；
+//   - 都不给：等同于 hours=72（保持旧调用方行为）。
 func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Usage == nil {
 		writeErr(w, http.StatusNotImplemented, "usage recorder not available")
 		return
 	}
-	hours := 72
-	if v := r.URL.Query().Get("hours"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			hours = n
+	q := r.URL.Query()
+	win := usage.Window{}
+	win.From = parseTimeParam(q.Get("from"))
+	win.To = parseTimeParam(q.Get("to"))
+	if win.From.IsZero() && win.To.IsZero() {
+		win.Hours = 72
+		if v := q.Get("hours"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				win.Hours = n
+			}
 		}
-	}
-	if hours > 1440 {
-		hours = 1440
+		if win.Hours > 1440 {
+			win.Hours = 1440
+		}
 	}
 	// 昵称仅用于展示，取自池快照（不含任何凭证）。
 	nicks := map[string]string{}
@@ -570,7 +748,38 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 			nicks[s.UID] = s.Nickname
 		}
 	}
-	writeJSON(w, http.StatusOK, p.cfg.Usage.Snapshot(hours, nicks))
+	var currentRate func(realm, model string) string
+	if p.cfg.Upstream != nil {
+		currentRate = p.cfg.Upstream.ModelRate
+	}
+	writeJSON(w, http.StatusOK, p.cfg.Usage.SnapshotWindow(win, nicks, currentRate))
+}
+
+// parseTimeParam 解析时间查询参数：unix 秒（前端默认）或 RFC3339（便于手工调
+// 接口/写脚本）。空串与非法值都返回零值 = 该侧不设界，不报错——区间参数是可选
+// 增强，拼错一个 from 不该让整页用量打不开。
+func parseTimeParam(v string) time.Time {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}
+	}
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if n <= 0 {
+			return time.Time{}
+		}
+		// 兼容秒与毫秒（前端可能直接把 Date.now() 传上来）。
+		if n > 1e12 {
+			return time.UnixMilli(n)
+		}
+		return time.Unix(n, 0)
+	}
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t
+	}
+	if t, err := time.ParseInLocation("2006-01-02T15:04", v, time.Local); err == nil {
+		return t
+	}
+	return time.Time{}
 }
 
 // usageSave 立即把内存中的用量桶落盘（正常由后台 30s 防抖刷新负责）。

@@ -51,3 +51,4 @@ wb2api
 *.tar.gz
 
 !EXPORT.md
+.DS_Store

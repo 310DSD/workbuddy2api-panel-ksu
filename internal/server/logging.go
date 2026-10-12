@@ -6,14 +6,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"net"
+	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
+
+// maxUserAgentLen 归档与面板展示保留的 UA 字节上限。UA 是客户端完全可控的
+// 自由文本（浏览器动辄 150+ 字符，恶意客户端可以塞几 KB），落盘前必须截断，
+// 否则一条请求就能把归档行撑大。截断只影响展示，不影响请求处理。
+const maxUserAgentLen = 200
 
 // chatSeq 进程级请求序号。
 var chatSeq atomic.Int64
@@ -32,14 +43,32 @@ func SetChatLogOutput(w io.Writer) { chatLogOut = w }
 
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
 type chatStat struct {
-	start  time.Time
-	model  string
-	mode   string // "stream" | "sync"
-	uid    string // 完整 uid，展示时只取前 8 位
-	nick   string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
-	ttfb   time.Duration
-	toks   int // <0 表示 usage 缺失 → 显示 "-"
-	status int
+	start            time.Time
+	model            string
+	mode             string // "stream" | "sync"
+	uid              string // 完整 uid，展示时只取前 8 位
+	nick             string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
+	ttfb             time.Duration
+	toks             int // <0 表示 usage 缺失 → 显示 "-"
+	status           int
+	requestID        string
+	outcome          string
+	attempts         int
+	credit           float64
+	hasCredit        bool
+	promptTokens     int64
+	completionTokens int64
+	totalTokens      int64
+	// 缓存命中观测（usage.prompt_cache_hit_tokens / miss）：上游给到才有效。
+	// 供 usage 桶命中率维度与 reqlog 逐次记录；缺失时 hasCache=false 不参与统计。
+	cacheHit  int64
+	cacheMiss int64
+	hasCache  bool
+
+	// 调用来源（客户端 IP / User-Agent）。空 = 未采集（logging.request_client_info
+	// 关闭，或非 chat 路径），展示层一律以 "-" 兜底。
+	clientIP  string
+	userAgent string
 
 	logged bool
 }
@@ -59,7 +88,8 @@ func (s *chatStat) done() {
 		return
 	}
 	s.logged = true
-	logChatRow(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.status, s.toks)
+	logChatRowEx(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.status, s.toks,
+		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit, s.clientIP, s.userAgent)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，
@@ -77,9 +107,16 @@ type chatStatsReader struct {
 	hasCompletionTokens bool
 	hasTotalTokens      bool
 	// credit 上游末帧 usage.credit（本次真实扣费积分），供成本台账（NoteModelCost）。
-	hasCredit bool
-	credit    float64
-	pend      []byte // 已读未返回的行缓存
+	hasCredit  bool
+	credit     float64
+	errorFrame bool
+	// cacheHit/cacheMiss 上游末帧 usage.prompt_cache_hit_tokens / miss_tokens，
+	// 供用量桶的命中率维度与 reqlog 逐次记录（issue #92）。
+	hasCacheHit  bool
+	cacheHit     int
+	cacheMiss    int
+	hasCacheMiss bool
+	pend         []byte // 已读未返回的行缓存
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -126,15 +163,24 @@ func (s *chatStatsReader) parseSSELine(line string) {
 		s.ttfb = time.Since(s.start)
 	}
 	var chunk struct {
+		Error json.RawMessage `json:"error"`
 		Usage *struct {
-			PromptTokens     *int     `json:"prompt_tokens"`
-			CompletionTokens *int     `json:"completion_tokens"`
-			TotalTokens      *int     `json:"total_tokens"`
-			Credit           *float64 `json:"credit"`
+			PromptTokens         *int     `json:"prompt_tokens"`
+			CompletionTokens     *int     `json:"completion_tokens"`
+			TotalTokens          *int     `json:"total_tokens"`
+			Credit               *float64 `json:"credit"`
+			PromptCacheHitTokens *int     `json:"prompt_cache_hit_tokens"`
+			PromptCacheMissTok   *int     `json:"prompt_cache_miss_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal([]byte(payload), &chunk) != nil || chunk.Usage == nil {
+		if json.Unmarshal([]byte(payload), &chunk) == nil && len(chunk.Error) > 0 {
+			s.errorFrame = true
+		}
 		return
+	}
+	if len(chunk.Error) > 0 {
+		s.errorFrame = true
 	}
 	if chunk.Usage.PromptTokens != nil {
 		s.hasPromptTokens = true
@@ -152,7 +198,35 @@ func (s *chatStatsReader) parseSSELine(line string) {
 		s.hasCredit = true
 		s.credit = *chunk.Usage.Credit
 	}
+	if chunk.Usage.PromptCacheHitTokens != nil {
+		s.hasCacheHit = true
+		s.cacheHit = *chunk.Usage.PromptCacheHitTokens
+	}
+	if chunk.Usage.PromptCacheMissTok != nil {
+		s.hasCacheMiss = true
+		s.cacheMiss = *chunk.Usage.PromptCacheMissTok
+	}
 }
+
+// CacheTokens 返回末帧 usage 的缓存命中 / 未命中 token 数。miss 缺失时按
+// prompt - hit 推导；hit 与 miss 均不可得时 ok=false（不参与命中率统计）。
+func (s *chatStatsReader) CacheTokens() (hit, miss int64, ok bool) {
+	if !s.hasCacheHit {
+		return 0, 0, false
+	}
+	hit = int64(s.cacheHit)
+	miss = int64(s.cacheMiss)
+	if !s.hasCacheMiss {
+		if !s.hasPromptTokens || s.promptTokens < s.cacheHit {
+			return hit, 0, true
+		}
+		miss = int64(s.promptTokens - s.cacheHit)
+	}
+	return hit, miss, true
+}
+
+// SawErrorFrame 报告流中是否透传过 SSE error 帧。
+func (s *chatStatsReader) SawErrorFrame() bool { return s.errorFrame }
 
 // Read 返回原始数据，同时解析统计 TTFB/token。
 func (s *chatStatsReader) Read(p []byte) (int, error) {
@@ -264,6 +338,133 @@ func uidPrefix(uid string) string {
 	return logfmt.UID8(uid)
 }
 
+type requestTraceKey struct{}
+
+// requestTrace 在一次 chat 请求内共享标识与最终统计，ServeHTTP 出口统一记账。
+type requestTrace struct {
+	id    string
+	start time.Time
+	stat  *chatStat
+	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
+	clientIP  string
+	userAgent string
+}
+
+// captureClientInfo 采集调用来源（客户端 IP + 截断后的 UA）。开关关闭时保持空串：
+// 来源信息比 token 计数敏感，是否落盘由 logging.request_client_info 决定。
+func (t *requestTrace) captureClientInfo(r *http.Request) {
+	if t == nil || r == nil {
+		return
+	}
+	t.clientIP = clientIPForLog(r)
+	t.userAgent = logfmt.Truncate(r.UserAgent(), maxUserAgentLen)
+}
+
+// clientIPForLog 提取用于日志展示的客户端 IP。
+//
+// 与 upstream.ExtractClientIP 的差别：后者只认代理头（X-Forwarded-For 首段 →
+// X-Real-IP），因为它的用途是把客户端 IP **透传给上游**，回落到网关自身地址会
+// 污染上游风控判据；日志场景相反——直连（无反代）时 RemoteAddr 就是唯一线索，
+// 必须回落，否则面板里所有来源都显示 "-"。代理头优先保证反代后拿到真实客户端。
+func clientIPForLog(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if ip := upstream.ExtractClientIP(r); ip != "" {
+		return ip
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
+}
+
+// dashIfEmpty 空串统一显示 "-"（来源字段未采集时不留空白列）。
+func dashIfEmpty(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "-"
+	}
+	return s
+}
+
+func requestTraceFrom(r *http.Request) *requestTrace {
+	if r == nil {
+		return nil
+	}
+	tr, _ := r.Context().Value(requestTraceKey{}).(*requestTrace)
+	return tr
+}
+
+func (t *requestTrace) event(status int) reqlog.Event {
+	e := reqlog.Event{
+		Time:      t.start,
+		RequestID: t.id,
+		Path:      "/v1/chat/completions",
+		Status:    status,
+	}
+	duration := time.Since(t.start)
+	e.DurationMs = duration.Milliseconds()
+	if e.DurationMs < 1 {
+		e.DurationMs = 1
+	}
+	if t.stat != nil {
+		s := t.stat
+		e.Account = logfmt.Label(s.uid, s.nick)
+		e.Model = s.model
+		e.Outcome = s.outcome
+		e.TTFBMs = s.ttfb.Milliseconds()
+		e.Attempts = s.attempts
+		e.PromptTokens = s.promptTokens
+		e.CompletionTokens = s.completionTokens
+		e.TotalTokens = s.totalTokens
+		e.Credit = s.credit
+		e.HasCredit = s.hasCredit
+		e.CacheHitTokens = s.cacheHit
+		e.CacheMissTokens = s.cacheMiss
+	}
+	e.ClientIP = t.clientIP
+	e.UserAgent = t.userAgent
+	if e.Outcome == "" {
+		if status >= 200 && status < 300 {
+			e.Outcome = reqlog.OutcomeSuccess
+		} else {
+			e.Outcome = reqlog.OutcomeHTTPError
+		}
+	}
+	e.OK = status >= 200 && status < 300 && e.Outcome == reqlog.OutcomeSuccess
+	return e
+}
+
+// responseObserver 捕获 handler 实际写出的 HTTP 状态，同时保留 Flusher/Unwrap，
+// 避免破坏 SSE 逐帧刷新。
+type responseObserver struct {
+	http.ResponseWriter
+	status int
+}
+
+func (o *responseObserver) WriteHeader(code int) {
+	if o.status == 0 {
+		o.status = code
+	}
+	o.ResponseWriter.WriteHeader(code)
+}
+
+func (o *responseObserver) Write(p []byte) (int, error) {
+	if o.status == 0 {
+		o.status = http.StatusOK
+	}
+	return o.ResponseWriter.Write(p)
+}
+
+func (o *responseObserver) Flush() {
+	if f, ok := o.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (o *responseObserver) Unwrap() http.ResponseWriter { return o.ResponseWriter }
+
 // 请求流水行的固定列宽（显示列宽，非字节）。取固定宽度而不是让内容自然长度撑开，
 // 是为了让 stdout 里成百上千行能竖着扫——否则模型名长短不一、中文昵称按字节补空格
 // 错位，根本没法用肉眼对齐着一列列看（这正是上一版 11 字节硬截断要解决的问题）。
@@ -286,6 +487,14 @@ const (
 //     uid8 时人眼无法判断是哪个号，要辨认必须再查 auths/，排障多一跳；
 //   - toks<0 表示 usage 缺失，显示 "-"。
 func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int) {
+	logChatRowEx(ttfb, total, model, mode, uid, nick, status, toks, "", "", 0, 0, false, "", "")
+}
+
+// logChatRowEx 是带请求 ID、结果、重试、积分与调用来源字段的扩展流水行。旧调用保持
+// 原格式；requestID 非空时才追加扩展字段；来源两参均为空时不追加来源段。
+func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int,
+	requestID, outcome string, attempts int, credit float64, hasCredit bool,
+	clientIP, userAgent string) {
 	if !chatLogEnabled {
 		return
 	}
@@ -297,8 +506,11 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status
 	tokpsField := "-"
 	if toks >= 0 {
 		tokField = fmt.Sprintf("%d", toks)
-		if total > 0 {
-			tokpsField = fmt.Sprintf("%.1ftok/s", float64(toks)/total.Seconds())
+		// 速率与用量账本走同一个函数（扣掉 TTFB）。此前这里自己除 total，漏扣首
+		// token 等待，于是控制台流水行的 tok/s 与面板数字对不上（issue #34）——
+		// 本函数本来就收到了 ttfb，只是没拿它算速率。
+		if tps, ok := tokensPerSecond(int64(toks), total, ttfb); ok {
+			tokpsField = fmt.Sprintf("%.1ftok/s", tps)
 		} else {
 			tokpsField = "0.0tok/s"
 		}
@@ -307,7 +519,32 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status
 	if ttfb > 0 {
 		ttfbMS = fmt.Sprintf("%dms", ttfb.Milliseconds())
 	}
-	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |\n",
+	extra := ""
+	if requestID != "" {
+		if outcome == "" {
+			outcome = reqlog.OutcomeHTTPError
+			if status >= 200 && status < 300 {
+				outcome = reqlog.OutcomeSuccess
+			}
+		}
+		creditField := "-"
+		if hasCredit {
+			creditField = fmt.Sprintf("%.4f", credit)
+		}
+		extra = fmt.Sprintf(" rid=%s | out=%s | try=%d | credit=%s |", requestID, outcome, attempts, creditField)
+	}
+	// 调用来源：IP 用可解析的裸值（便于 grep），UA 用 ShortUA 压缩后的客户端标签
+	// 并加引号（标签内可能含空格，如 `OpenAI/Python 1.30.0` 只会取到 OpenAI/Python）。
+	// 两者都未采集时不追加，旧行格式保持不变。
+	src := ""
+	if clientIP != "" || userAgent != "" {
+		ua := "-"
+		if s := logfmt.ShortUA(userAgent); s != "" {
+			ua = `"` + s + `"`
+		}
+		src = fmt.Sprintf(" src=%s ua=%s |", dashIfEmpty(clientIP), ua)
+	}
+	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |%s%s\n",
 		seq,
 		time.Now().Format("15:04:05"),
 		model,
@@ -318,5 +555,53 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status
 		logfmt.Pad(tokField, chatTokWidth),
 		logfmt.Pad(tokpsField, chatRateWidth),
 		total.Seconds(),
+		extra,
+		src,
 	)
+}
+
+// cacheMissSignal 低命中率告警信号（issue #92 P1 轻量化）：同一模型此前观测到过
+// 命中、本次大前缀（≥1000 tok）整段未命中（命中率 <10%）时打一条 WARN，每模型
+// 10 分钟冷却。只报「本可命中却重算」的可行动信号——新模型/新会话的首请求天然
+// 全 miss，不在此列。
+type cacheMissSignal struct {
+	mu      sync.Mutex
+	everHit map[string]bool
+	last    map[string]time.Time
+}
+
+var cacheMissWarn = &cacheMissSignal{everHit: map[string]bool{}, last: map[string]time.Time{}}
+
+// cacheMissWarnEvery 冷却间隔；变量供测试缩短。
+var cacheMissWarnEvery = 10 * time.Minute
+
+// noteCacheTokens 记录一次观测：有命中 → 标记该模型可命中；整段未命中且此前
+// 命中过 → 触发 WARN（冷却内不重复）。
+func (c *cacheMissSignal) noteCacheTokens(model string, prompt, hit, miss int64) {
+	if model == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if hit > 0 {
+		c.everHit[model] = true
+		return
+	}
+	// hit==0 才可能是整段重算。小前缀（<1000 tok）的 miss 无告警价值；上游未回
+	// miss 字段时按 prompt 全量视为未命中。
+	if prompt < 1000 {
+		return
+	}
+	if miss <= 0 {
+		miss = prompt
+	}
+	if !c.everHit[model] {
+		return
+	}
+	now := time.Now()
+	if t, ok := c.last[model]; ok && now.Sub(t) < cacheMissWarnEvery {
+		return
+	}
+	c.last[model] = now
+	log.Printf("WARN: [server] cache miss: model=%s 本次大前缀未命中（prompt=%d miss=%d，此前观测到过命中）；上游前缀缓存重算，费用会显著升高", model, prompt, miss)
 }
