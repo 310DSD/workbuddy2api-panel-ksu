@@ -234,7 +234,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	return e.a
 }
 
-// floorBlockedForModel 积分保底拦截判定（pick 普通轮换与 PickByUIDForModel 粘性
+// floorBlockedForRealmModel 积分保底拦截判定（pick 普通轮换与 PickByUIDForModel 粘性
 // 路径的单一事实来源）：floor>0 且账号触底（credits < floor）且该模型**收费**
 // 时为真。
 //
@@ -257,12 +257,8 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 // 余额用本地插值口径（签到权威值 - 每笔 usage.credit 实扣，见 NoteModelCost）：
 // 只会偏低不会偏高（官方对账延迟方向安全），正是保底需要的安全方向。
 // 调用方必须已持有 p.mu（读 e.credits / e.modelCost / p.modelRateOf）。
-func (p *Pool) floorBlockedForModel(e *entry, model string, now time.Time) bool {
-	return p.floorBlockedForRealmModel(e, model, "", now)
-}
-
-// floorBlockedForRealmModel 同上，但带 realm 上下文（倍率按 (realm, 模型) 分桶，
-// 同名模型在 CN / global 两域倍率可不同）。realm 为空时按倍率表的空域键查。
+// 倍率按 (realm, 模型) 分桶：同名模型在 CN / global 两域倍率可不同，realm 为空时
+// 按倍率表的空域键查。
 func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time.Time) bool {
 	if p.creditFloor <= 0 || model == "" || e.credits >= p.creditFloor {
 		return false

@@ -211,15 +211,6 @@ func resetModelCatalog() {
 	c.loaded = false
 }
 
-// loadModelCatalogAt 测试接线：指向指定路径后立即触发一次加载（同步，可断言文件
-// 解析行为）。生产路径用 SetModelCatalogPath（惰性首次 get 触发加载）。
-func loadModelCatalogAt(path string) {
-	SetModelCatalogPath(path)
-	catalogState.mu.Lock()
-	defer catalogState.mu.Unlock()
-	catalogState.initLocked()
-}
-
 // ResetLookupChainForTest 跨包测试钩子：清空 model.json 缓存与 models.dev fetcher
 // 的全部包级单例状态（含在途拉取冷却——防 server 包测试末尾的异步 goroutine 打
 // 真网、防跨测试缓存污染）。仅测试引用（upstream 包内用 resetModelsDev /

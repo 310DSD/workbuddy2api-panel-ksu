@@ -221,7 +221,7 @@ func (c *Client) GlobalCompleteRegistration(a *auth.Auth) (activated bool, err e
 		return false, fmt.Errorf("submit region: %w", err)
 	}
 	// 重新激活验证。
-	activated, needsRegion, msg, err = c.GlobalRegisterStatus(a)
+	activated, _, msg, err = c.GlobalRegisterStatus(a)
 	if err != nil {
 		return false, err
 	}

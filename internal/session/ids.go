@@ -123,36 +123,6 @@ func TurnKey(body []byte) string {
 	return ""
 }
 
-// contentText 取消息 content 的文本：字符串形态直接返回；数组形态（多模态 parts）
-// 拼接各 part 的 text 字段。无文本（纯图片 / null / 未知形态）返回 ""。
-func contentText(raw json.RawMessage) string {
-	s := strings.TrimSpace(string(raw))
-	if s == "" || s == "null" {
-		return ""
-	}
-	switch s[0] {
-	case '"':
-		var str string
-		if err := json.Unmarshal(raw, &str); err != nil {
-			return ""
-		}
-		return str
-	case '[':
-		var parts []struct {
-			Text string `json:"text"`
-		}
-		if err := json.Unmarshal(raw, &parts); err != nil {
-			return ""
-		}
-		var b strings.Builder
-		for _, p := range parts {
-			b.WriteString(p.Text)
-		}
-		return b.String()
-	}
-	return ""
-}
-
 // contentSignature 取消息 content 的确定性签名（G1 修复——纯图片轮不再碎片化）：
 //   - string 形态：返回文本，与 contentText 结果**完全一致**——纯文本路径键值
 //     不变，存量会话的轮键/粘性键零漂移（向后兼容契约）；

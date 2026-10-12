@@ -82,7 +82,7 @@ func (r *Ring) Write(p []byte) (int, error) {
 		copy(r.entries[0:r.cap], r.entries[extra:])
 		r.entries = r.entries[:r.cap]
 		if cap(r.entries) > r.cap*2 {
-			trimmed := make([]LogEntry, r.cap, r.cap)
+			trimmed := make([]LogEntry, r.cap)
 			copy(trimmed, r.entries)
 			r.entries = trimmed
 		}

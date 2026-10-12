@@ -1024,60 +1024,63 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		prepared = ensureConsoleSystem(prepared)
 	}
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
-	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 +
-	// 尾部不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
-	for _, path := range c.chatPaths(a) {
-		endpoint := c.chatBase(a) + path
-		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(prepared))
-		if err != nil {
-			return nil, 0, nil, err
-		}
-		c.ChatHeaders(req, a, clientIP, meta)
-		// 从调用方 ctx 派生：保留取消传播（父 ctx 取消 → 本 ctx 取消），
-		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
-		reqCtx, cancel := context.WithCancel(ctx)
-		req = req.WithContext(reqCtx)
-		resp, err := c.chatHTTP().Do(req)
-		if err != nil {
-			cancel()
-			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
-			// 传输层失败 → 清空共享连接池的空闲连接（连接层加固）：失败连接可能仍
-			// 留在空闲池里，下一个请求会继续捡到它——仅靠 IdleConnTimeout 等过期
-			// 不够，主动清池才断根。
-			roundTripCloseIdle(c.chatHTTP().Transport)
-			return nil, 0, nil, err
-		}
-		if resp.StatusCode >= 400 {
-			raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			resp.Body.Close()
-			cancel()
-			// body 读失败（掐流/截断）→ 传输层错误：半截 raw 不交回调用方进 Classify，
-			// 否则 handler 侧 applyErrorPolicy 会按误判分类罚号。
-			if rerr != nil {
-				log.Printf("ERR: [upstream] chat_stream acct=%s: read body: %v", logfmt.Label(a.UID, a.Nickname), rerr)
-				return nil, 0, nil, fmt.Errorf("read body: %w", rerr)
-			}
-			kind := Classify(resp.StatusCode, string(raw))
-			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
-				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
-			// ≥400 直接返回（#119 后 global 单路径 /v2，chat 层无 fallback 链）。
-			// 分类一次、随 Kind 信封返回（含 Retry-After 头解析）：
-			// ErrNone 是防御分支（≥400 不应产生 None），返回原文让 handler 兜底。
-			if kind == ErrNone {
-				return nil, resp.StatusCode, raw, nil
-			}
-			ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
-			if d, ok := ParseRetryAfter(resp.Header); ok {
-				ue.RetryAfter = d
-			}
-			return nil, resp.StatusCode, raw, ue
-		}
-		// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；
-		// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：
-		// 取消传播由 http.Transport 在 body Close / 父 ctx 取消时处理，连接正常清理。
-		return monitorBody(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
+	// 各分支必 return——无尾部兜底 cancel（此前尾部不可达 cancel() 是潜伏 nil-panic，已删）。
+	// chatPaths 设计上恒单元素（#119 后 chat 层无 fallback 链）；空集防御性返回错误而非
+	// panic——任何配置/重构失误都不该升级成进程级崩溃（严格审查 M3）。
+	paths := c.chatPaths(a)
+	if len(paths) == 0 {
+		return nil, 0, nil, fmt.Errorf("no chat path configured")
 	}
-	panic("unreachable: chatPaths is never empty") // for range 空集时编译器仍要求兜底 return；chatPaths 恒非空（构造保证），永不触达
+	path := paths[0]
+	endpoint := c.chatBase(a) + path
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(prepared))
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	c.ChatHeaders(req, a, clientIP, meta)
+	// 从调用方 ctx 派生：保留取消传播（父 ctx 取消 → 本 ctx 取消），
+	// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
+	reqCtx, cancel := context.WithCancel(ctx)
+	req = req.WithContext(reqCtx)
+	resp, err := c.chatHTTP().Do(req)
+	if err != nil {
+		cancel()
+		log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
+		// 传输层失败 → 清空共享连接池的空闲连接（连接层加固）：失败连接可能仍
+		// 留在空闲池里，下一个请求会继续捡到它——仅靠 IdleConnTimeout 等过期
+		// 不够，主动清池才断根。
+		roundTripCloseIdle(c.chatHTTP().Transport)
+		return nil, 0, nil, err
+	}
+	if resp.StatusCode >= 400 {
+		raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		cancel()
+		// body 读失败（掐流/截断）→ 传输层错误：半截 raw 不交回调用方进 Classify，
+		// 否则 handler 侧 applyErrorPolicy 会按误判分类罚号。
+		if rerr != nil {
+			log.Printf("ERR: [upstream] chat_stream acct=%s: read body: %v", logfmt.Label(a.UID, a.Nickname), rerr)
+			return nil, 0, nil, fmt.Errorf("read body: %w", rerr)
+		}
+		kind := Classify(resp.StatusCode, string(raw))
+		log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
+			logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
+		// ≥400 直接返回（#119 后 global 单路径 /v2，chat 层无 fallback 链）。
+		// 分类一次、随 Kind 信封返回（含 Retry-After 头解析）：
+		// ErrNone 是防御分支（≥400 不应产生 None），返回原文让 handler 兜底。
+		if kind == ErrNone {
+			return nil, resp.StatusCode, raw, nil
+		}
+		ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+		if d, ok := ParseRetryAfter(resp.Header); ok {
+			ue.RetryAfter = d
+		}
+		return nil, resp.StatusCode, raw, ue
+	}
+	// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；
+	// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：
+	// 取消传播由 http.Transport 在 body Close / 父 ctx 取消时处理，连接正常清理。
+	return monitorBody(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 }
 
 // ModelInfo 动态模型信息（含 maxInputTokens/maxOutputTokens + 上游模型对象全字段）。

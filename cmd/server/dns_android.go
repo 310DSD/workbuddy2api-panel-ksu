@@ -16,8 +16,8 @@ import (
 // 这里改用系统 getprop 的 DNS，并兜底公共解析器；不影响查询结果，只换解析通道。
 
 var (
-	dnsMu      sync.Mutex
-	dnsCached  []string
+	dnsMu       sync.Mutex
+	dnsCached   []string
 	dnsCachedAt time.Time
 )
 
