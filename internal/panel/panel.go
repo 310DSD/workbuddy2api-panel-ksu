@@ -198,11 +198,20 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // withAuth 与 server 包同口径的 Bearer 鉴权（经 httpauth 常量时间比较）；
 // api_key 为空时放行。密钥经 livecfg 快照读取：面板里改了 api_key，下一个请求
 // 即用新值（无需重启）。
+// panelMaxBodyBytes 面板 API 请求体上限（32 MiB）。面板所有写接口都在 withAuth 后
+// 统一套 http.MaxBytesReader：此前 import 的 multipart 只有内存阈值、各 JSON 接口
+// 直接用 json.NewDecoder(r.Body)，请求体总量无上限——认证后可被超大 body 打爆
+// 内存/磁盘（严格审查 H2）。
+const panelMaxBodyBytes = 32 << 20
+
 func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !httpauth.VerifyBearer(r, p.apiKey()) {
 			writeErr(w, http.StatusUnauthorized, "invalid_api_key")
 			return
+		}
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, panelMaxBodyBytes)
 		}
 		next(w, r)
 	}
