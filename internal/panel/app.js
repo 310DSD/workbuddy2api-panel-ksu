@@ -1119,6 +1119,7 @@ function openAdd() {
   $('addLoad').hidden = true; $('addReady').hidden = true;
   $('addDone').hidden = true; $('addErr').hidden = true;
   $('importDone').hidden = true; $('importErr').hidden = true;
+  $('importNativeDone').hidden = true; $('importNativeErr').hidden = true;
   $('btnCopyUrl').hidden = true; $('btnOpenUrl').hidden = true;
   $('btnStartLogin').hidden = false; $('btnStartLogin').disabled = false;
   stopPoll();
@@ -1127,6 +1128,7 @@ function switchAddTab(tab) {
   document.querySelectorAll('#addTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   $('addTabLogin').hidden = tab !== 'login';
   $('addTabImport').hidden = tab !== 'import';
+  $('addTabNative').hidden = tab !== 'native';
 }
 document.querySelectorAll('#addTabs .tab').forEach(b => {
   b.onclick = () => switchAddTab(b.dataset.tab);
@@ -1199,6 +1201,52 @@ $('importFile').onchange = async () => {
     $('importErr').textContent = '导入失败：' + e.message;
   }
   $('importFile').value = '';
+};
+// 原生 auth JSON 导入：支持多选文件，逐个调用 /panel/api/import/native。
+// 默认不覆盖已存在 uid；勾选覆盖后才替换（并清掉旧冷却状态）。
+$('importNativeFile').onchange = async () => {
+  const files = Array.from($('importNativeFile').files || []);
+  if (!files.length) return;
+  const done = $('importNativeDone'), err = $('importNativeErr');
+  done.hidden = true; err.hidden = true;
+  const overwrite = $('importNativeOverwrite').checked ? '1' : '0';
+  const k = localStorage.getItem(LS_KEY);
+  let imported = 0, skipped = 0, overwritten = 0, failed = 0;
+  const errs = [];
+  for (const f of files) {
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('overwrite', overwrite);
+    const h = {};
+    if (k) h['Authorization'] = 'Bearer ' + k;
+    try {
+      const r = await fetch('/panel/api/import/native', { method: 'POST', body: fd, headers: h });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      imported += d.imported || 0;
+      skipped += d.skipped || 0;
+      overwritten += d.overwritten || 0;
+      if (d.errors && d.errors.length) errs.push(...d.errors);
+    } catch (e) {
+      failed++;
+      errs.push(f.name + ': ' + e.message);
+    }
+  }
+  if (errs.length) console.warn('native import errors:', errs);
+  if (imported || overwritten || skipped) {
+    done.hidden = false;
+    done.textContent = '导入完成：成功 ' + imported + ' 个'
+      + (overwritten ? '（其中覆盖 ' + overwritten + ' 个）' : '')
+      + (skipped ? '，跳过 ' + skipped + ' 个' : '')
+      + (failed ? '，文件失败 ' + failed + ' 个' : '')
+      + (skipped && !overwrite ? '（已存在账号默认跳过，勾选「覆盖」可替换）' : '');
+  }
+  if (failed) {
+    err.hidden = false;
+    err.textContent = '导入失败 ' + failed + ' 个文件：' + errs.slice(0, 3).join('；');
+  }
+  $('importNativeFile').value = '';
+  loadOverview(true);
 };
 
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */

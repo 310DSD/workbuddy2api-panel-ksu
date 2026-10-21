@@ -1363,7 +1363,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <h3>添加账号</h3>
       <div class="tabs" id="addTabs">
         <button class="tab on" data-tab="login">浏览器登录</button>
-        <button class="tab" data-tab="import">导入 JSON</button>
+        <button class="tab" data-tab="native">导入原生 JSON</button>
+        <button class="tab" data-tab="import">导入 cockpit JSON</button>
       </div>
     </header>
     <div class="body">
@@ -1392,6 +1393,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <input type="file" id="importFile" accept=".json" style="margin-bottom:8px">
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
+      </div>
+      <!-- 导入原生 auth JSON -->
+      <div id="addTabNative" class="tab-panel" hidden>
+        <div class="hint" style="margin-bottom:8px">选择本程序 <code>auths/workbuddy-&lt;uid&gt;.json</code> 格式的文件（单个账号对象，或多个账号组成的数组）。字段与磁盘存储完全一致，无需转换。</div>
+        <input type="file" id="importNativeFile" accept=".json" multiple style="margin-bottom:8px">
+        <label class="hint" style="display:flex;align-items:center;gap:6px;margin-bottom:8px;font-size:12px">
+          <input type="checkbox" id="importNativeOverwrite"> 覆盖已存在的账号（默认跳过，不覆盖线上凭证）
+        </label>
+        <div id="importNativeDone" class="state ok" hidden></div>
+        <div id="importNativeErr" class="state err" hidden></div>
       </div>
     </div>
     <footer>
