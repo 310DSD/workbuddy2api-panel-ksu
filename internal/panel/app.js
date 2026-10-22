@@ -2990,5 +2990,80 @@ async function loadExpiry(force) {
 
 if ($('btnExp')) $('btnExp').onclick = () => loadExpiry(true);
 
+/* ── 官方补偿（先查后领）──────────────────────────────────────────────
+   盲领的病根：无活动 / 已领过时上游仍回 code=0 且 body 无 credit，领取函数返回
+   (0,nil)——日志里多一行假的「+0c」成功行，真正的失败（401/5xx/网络）反倒无痕。
+   所以面板先查状态：只有 active && !claimed && credit_num>0 才给「领取」按钮。
+   查询失败的账号照样占一行（error），不把「查不到」显示成「没有」。 */
+function compStatusText(r) {
+  if (r.error) return { cls: 'var(--bad)', text: '查询失败：' + esc(r.error) };
+  if (!r.active) return { cls: 'var(--ink-3)', text: '当前无补偿活动' };
+  if (r.claimed) return { cls: 'var(--ok)', text: '已领取' };
+  if (!r.credit_num) return { cls: 'var(--ink-3)', text: '活动在但无可领额度' };
+  const left = r.hours_left;
+  const deadline = r.end_time ? '截止 ' + esc(r.end_time) : '无截止时间';
+  const tail = r.expired ? ' · 已过期' : (left == null || left < 0 ? '' : ' · 剩 ' + dur(left * 3600));
+  return {
+    cls: left != null && left >= 0 && left <= 48 ? 'var(--bad)' : 'var(--warn)',
+    text: '可领 ' + fmtTok(r.credit_num) + 'c · ' + deadline + tail,
+  };
+}
+
+function renderCompensation(d) {
+  const list = (d && d.accounts) || [];
+  const pending = (d && d.pending) || 0;
+  const failed = (d && d.failed) || 0;
+  const rows = list.map(r => {
+    const st = compStatusText(r);
+    const btn = r.pending
+      ? '<button class="xs primary" data-comp="' + esc(r.uid) + '">领取</button>' : '';
+    return '<div class="exp-row"><span class="exp-dot" style="background:' + st.cls + '"></span>' +
+      '<span class="exp-nm">' + esc(r.nickname || r.uid.slice(0, 8)) + '</span>' +
+      '<span class="exp-main">' + st.text + '</span>' +
+      '<span class="grow"></span>' + btn + '</div>';
+  }).join('');
+  $('compList').innerHTML = rows || '<div class="empty">没有账号</div>';
+  $('compNote').textContent = pending
+    ? pending + ' 个账号有待领补偿' + (failed ? ' · ' + failed + ' 个查询失败' : '')
+    : (failed ? failed + ' 个账号查询失败' : '暂无待领补偿');
+}
+
+async function loadCompensation() {
+  if (!$('compList')) return;
+  if (!$('compList').children.length) $('compList').innerHTML = '<div class="empty">查询中…</div>';
+  $('compNote').textContent = '查询中…';
+  try { renderCompensation(await api('compensation')); }
+  catch (e) { $('compNote').textContent = '查询失败：' + esc(e.message); }
+}
+
+// 单号领取：后端同样是「查 → 有待领才领」，前端只负责把结果说清楚。
+async function claimCompensation(uid) {
+  try {
+    const d = await api('accounts/' + encodeURIComponent(uid) + '/compensation', { method: 'POST' });
+    if (d.claimed) toast('已领取 ' + (d.credit || 0) + ' 积分', 'ok');
+    else toast(d.reason === 'already_claimed' ? '该账号已领过' : '该账号当前无补偿可领', 'ok');
+  } catch (e) { toast('领取失败：' + e.message, 'err'); }
+  loadCompensation();
+}
+
+if ($('btnComp')) $('btnComp').onclick = () => loadCompensation();
+if ($('btnCompAll')) $('btnCompAll').onclick = async () => {
+  const b = $('btnCompAll');
+  b.disabled = true; b.textContent = '领取中…';
+  $('compNote').textContent = '逐号查状态并领取…';
+  try {
+    const d = await api('compensation_all', { method: 'POST' });
+    toast('领取 ' + (d.claimed || 0) + ' 个 · 无待领 ' + (d.skipped || 0) + ' 个' +
+      (d.failed ? ' · 失败 ' + d.failed + ' 个' : ''), d.failed ? 'err' : 'ok');
+  } catch (e) { toast('批量领取失败：' + e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = '全量领取'; }
+  loadCompensation();
+};
+// 行内「领取」按钮：容器委托（行是 innerHTML 重建的，逐个绑定会泄漏监听器）。
+if ($('compList')) $('compList').onclick = ev => {
+  const b = ev.target.closest('button[data-comp]');
+  if (b) claimCompensation(b.dataset.comp);
+};
+
 // 「刷新」始终实时查（显式 force，不依赖事件对象真值）
 if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);

@@ -828,6 +828,19 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="pad"><div id="expList"></div></div>
       </div>
 
+      <!-- 官方补偿：先查状态再领。查询失败的账号照样占一行（不把「查不到」显示成
+           「没有」——两者的处置完全不同）。倒计时 ≤48h 标红，补偿过期不候。 -->
+      <div class="box" id="compBox">
+        <header>
+          <h3>官方补偿<span class="hint">先查状态再领 · 带领取截止倒计时（≤48h 标红）</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="compNote"></span>
+          <button class="xs" id="btnCompAll" title="逐号查状态，仅对「可领且未领」的账号发起领取">全量领取</button>
+          <button class="xs" id="btnComp">检查</button>
+        </header>
+        <div class="pad"><div id="compList"><div class="empty">点「检查」逐号查询补偿状态（只查不领）</div></div></div>
+      </div>
+
       <div class="box">
         <header>
           <h3>账号池</h3>
