@@ -610,6 +610,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			unbindSticky()
 		}
 	}
+	// zeroOutputs 本轮里「上游收下请求却零输出」的尝试次数（见 upstream.errZeroOutput）。
+	// 它不罚账号、只换号重发；全池都撞时用它区分终局错误（502 zero_output_length），
+	// 而不是混进 no_healthy_account —— 那是服务端过载语义，会让客户端无脑重试。
+	zeroOutputs := 0
 	// ttfb 首 token 等待（仅流式有观测；非流式传 0 = 无观测，速率不扣减）。
 	// 显式入参而不是读 st.ttfb：后者在流式分支里是**调用之后**才赋值的，
 	// 靠顺序传递会让将来重排代码时静默把速率算回旧的错口径。
@@ -980,7 +984,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
 			}), upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }),
-				upstream.WithMarkupRepair(repair))
+				upstream.WithMarkupRepair(repair),
+				// 零输出守卫：首可见输出之前不提交响应头也不写出字节，于是上游
+				// 「200 + finish=length + 全空」可以在零字节写出的前提下被发现，
+				// 换号重发对客户端完全无痕（见 upstream.errZeroOutput 的说明）。
+				upstream.WithZeroOutputGuard())
 			switch {
 			case upstream.IsEmptyStreamError(sErr):
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
@@ -1003,6 +1011,28 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeStreamError
 				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
 					logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(errFrame, 200))
+			case upstream.IsZeroOutputError(sErr):
+				// 上游「收下请求却零输出」：HTTP 200、有收尾帧、finish_reason=length，
+				// 但正文/思考/工具全空（典型成因：输入越过模型**真实**窗口，声明的
+				// context_length 被虚报；或 max_tokens 被思考吃光）。
+				//
+				// 处置要点：
+				//   - **不罚号、不冷却**——这是请求形态问题，不是账号健康问题；
+				//   - **换号重发一次**：另一号可能对同一输入给出非零输出（不同号的上游
+				//     路由/窗口口径不完全一致）；
+				//   - 客户端无痕：StreamHint 的零输出守卫把空壳帧全攒在内存里，此刻
+				//     网关一个字节都没写出（响应头也没提交）。
+				zeroOutputs++
+				recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+				st.outcome = reqlog.OutcomeStreamError
+				log.Printf("WARN: [server] stream acct=%s model=%s: zero output (200 + finish=length, empty content/reasoning/tools) → rotate without penalty",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel)
+				rc.Close()
+				fail(acct.UID)
+				if !rotateBackoff(i, r.Context()) {
+					break
+				}
+				continue
 			case sErr != nil:
 				// 客户端写失败（断连）：上游帧无恙，账号健康——账号侧照常记成功
 				// （与 default 同语义），请求日志归为 Interrupted（人已走，未完成）。
@@ -1086,6 +1116,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				bareModel, m, len(declaredTools))
 		}
 		credit, total, hasCredit := usageCreditTotal(resp)
+		// 非流式零输出守卫（与流式同判据，见 upstream.IsZeroOutputResponse）：
+		// 聚合体 finish_reason=length 且正文/思考/工具全空 → 不罚号、换号重发一次。
+		// 客户端还没收到任何字节（本分支在 writeJSON 之前判定）。
+		if upstream.IsZeroOutputResponse(resp) {
+			zeroOutputs++
+			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+			st.outcome = reqlog.OutcomeStreamError
+			log.Printf("WARN: [server] non-stream acct=%s model=%s: zero output (finish=length, empty content/reasoning/tools) → rotate without penalty",
+				logfmt.Label(acct.UID, acct.Nickname), bareModel)
+			fail(acct.UID)
+			if !rotateBackoff(i, r.Context()) {
+				break
+			}
+			continue
+		}
 		if usage, ok := resp["usage"].(map[string]any); ok {
 			if hit, okH := upstream.UsageCacheHitTokens(usage); okH {
 				miss, _ := upstream.UsageCacheMissTokens(usage)
@@ -1112,6 +1157,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.hasCredit = true
 			h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
 		}
+		return
+	}
+	// 零输出终局（见 upstream.errZeroOutput）：所有尝试都「收下请求却零输出」时如实
+	// 回 502 + 可行动 hint。它不是账号健康问题（不罚号）、也不是可重试的服务端过载
+	// （别混进 no_healthy_account 让客户端无脑重试）——真正该做的是缩短输入、调大
+	// max_tokens 或换模型。
+	if zeroOutputs > 0 {
+		writeOpenAIErrorHint(w, http.StatusBadGateway, "zero_output_length",
+			"every attempt returned an empty response (finish_reason=length with no content, reasoning or tool calls)",
+			"zero_output: the input likely exceeds the model's real context window (declared context_length may be overstated), or max_tokens is too small for the reasoning budget; shorten the input, raise max_tokens, or switch model")
+		st.status = http.StatusBadGateway
+		st.outcome = reqlog.OutcomeHTTPError
 		return
 	}
 	// 末端错误透传（error-passthrough）：上游返回的错误原样透传，不再规范化成固定文案。

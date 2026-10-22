@@ -505,8 +505,11 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 | 请求体解析失败 | HTTP 400 + `Unmarshal chat params failed` / code `11101` | **不罚账号，但仍轮转**（客户端畸形 JSON，换号照样 400） | 即时 |
 | 内容拦截 | HTTP 400 + 审核文案 | **不罚账号**，`passthrough` 模式走降级重试 | 即时 |
 | 客户端错误 | 其余 4xx / 业务 `code≠0` | 不处罚，换号重试 | 即时 |
+| **零输出**（`zero_output_length`） | HTTP 200 + 收尾帧 `finish_reason=length`，但正文 / 思考 / 工具调用**全空** | **不罚账号**，换号重发一次（网关零字节写出，客户端无痕）；全池都撞则回 `502 zero_output_length` + 可行动 hint | 即时 |
 
 请求体解析失败（`11101`）与内容拦截一样**不罚账号**：问题在请求内容而非账号健康。网关不做请求体截断与预拦截，`11101` 均为客户端发来的畸形 JSON。
+
+**零输出守卫**（`upstream.WithZeroOutputGuard`）：上游「收下请求却零输出」此前被当成一次成功——客户端拿到空正文，网关零日志零计数，下一次照旧挑同一个号撞同一面墙。典型成因是输入越过模型**真实**上下文窗口（声明的 `context_length` 被虚报），或 `max_tokens` 被思考吃光。现在流式路径在**写出第一个可见字节之前**判定（role 帧 / 空 delta 帧 / usage-only 帧都先攒在内存里，响应头也不提交），命中即换号重发；非流式在聚合体上同判据。它是**请求形态问题**而非账号健康问题，所以既不冷却也不喂连败计数；全池都撞时返回 `502 zero_output_length` 并提示缩短输入 / 调大 `max_tokens` / 换模型——不会伪装成 `no_healthy_account`（那会让客户端无脑重试）。
 
 **熔断器**：所有冷却入口与 5xx 共用唯一连续失败计数器 `fails`；累计达 `breaker_threshold`（默认 3）触发熔断，退避 `breaker_cooldown × 2^retryCount`，封顶 `6h`；成功清零。
 

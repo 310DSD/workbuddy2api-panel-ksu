@@ -3,6 +3,7 @@ package upstream
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,50 @@ var errEmptyStream = errors.New("upstream stream contained no valid data events"
 // 在流式路径把空流记为失败观测（HTTP 头已发出只能 200，但日志/状态应收敛到
 // upstream_parse 同语义），与客户端断连类错误区分。
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
+
+// errZeroOutput 上游「收下请求却零输出」：HTTP 200、有收尾帧、finish_reason=length，
+// 但正文 / 思考 / 工具调用**全空**。典型成因是输入越过模型**真实**上下文窗口（声明
+// 的 context_length 被虚报），预算一进来就被判满。它此前被当成一次成功：客户端拿到
+// 空正文，网关零日志零计数，下一次照旧挑同一个号撞同一面墙。
+//
+// 与 errEmptyStream 的区别：空流是「一帧都没有」（上游/通道故障），本错误是「有帧、
+// 有收尾，但没有一个字」（请求形态问题）——所以处置也不同：本错误**不罚账号**，
+// 只换号重发一次，全池都撞则如实回 502 + 可行动 hint。
+var errZeroOutput = errors.New("upstream returned zero output (finish_reason=length with empty content)")
+
+// IsZeroOutputError 报告错误是否为「零输出」（见 errZeroOutput）。
+func IsZeroOutputError(err error) bool { return errors.Is(err, errZeroOutput) }
+
+// IsZeroOutputResponse 非流式口径的同一判据：choices[0].message 的 content /
+// reasoning_content 全空、无 tool_calls、且 finish_reason=length。
+// 聚合路径用它决定「换号重发 vs 正常返回」。
+func IsZeroOutputResponse(resp map[string]any) bool {
+	chs, _ := resp["choices"].([]any)
+	if len(chs) == 0 {
+		return false
+	}
+	first, _ := chs[0].(map[string]any)
+	if first == nil {
+		return false
+	}
+	if fr, _ := first["finish_reason"].(string); fr != "length" {
+		return false
+	}
+	msg, _ := first["message"].(map[string]any)
+	if msg == nil {
+		return false
+	}
+	if s, _ := msg["content"].(string); strings.TrimSpace(s) != "" {
+		return false
+	}
+	if s, _ := msg["reasoning_content"].(string); strings.TrimSpace(s) != "" {
+		return false
+	}
+	if tcs, _ := msg["tool_calls"].([]any); len(tcs) > 0 {
+		return false
+	}
+	return true
+}
 
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
@@ -485,6 +530,17 @@ type StreamOption func(*streamOptions)
 type streamOptions struct {
 	onErrorFrame func(payload string)
 	markup       *MarkupRepair
+	zeroGuard    bool
+}
+
+// WithZeroOutputGuard 打开「零输出守卫」（见 errZeroOutput）：在向客户端写出第一个
+// **可见**字节之前，所有待发字节先攒在内存里、响应头也不提交。这样上游「200 + 收尾
+// finish_reason=length + 正文/思考/工具全空」的形态可以在**零字节写出**的前提下被
+// 发现，StreamHint 直接返回 errZeroOutput，由调用方换号重发——客户端完全无痕。
+//
+// 不开守卫（默认）时行为与旧版逐字节一致：首帧（role 帧）落地即提交响应头。
+func WithZeroOutputGuard() StreamOption {
+	return func(o *streamOptions) { o.zeroGuard = true }
 }
 
 // WithMarkupRepair 注册「模型原生工具调用标记」修复器（见 dsml.go）。
@@ -544,15 +600,47 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	maxToolIdx := -1
 	toolFinishSent := false
 
-	// writeSSE 原样写出一帧并 flush。
-	writeSSE := func(payload string) error {
-		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
+	// ── 零输出守卫的写出闸门（见 WithZeroOutputGuard / errZeroOutput）──────────
+	// committed=false 时所有字节只进 pending、不写 w（于是响应头也没提交）。
+	// 一旦看到第一个**可见**输出（正文 / 思考 / 工具分片）或上游 error 帧就 commit，
+	// 此后再无「零字节」可言，透传开销退化为一次内存拷贝（仅首字节前后）。
+	var pending bytes.Buffer
+	committed := !o.zeroGuard
+	visible := false      // 是否见过可见输出（正文/思考/工具分片）
+	zeroFinish := ""      // 最后一次见到的 finish_reason（零输出判据用）
+	zeroErrFrame := false // 是否见过上游 error 帧（有错误就交给既有错误路径）
+	direct := func(b []byte) error {
+		if _, werr := w.Write(b); werr != nil {
 			return werr
 		}
 		if fl != nil {
 			fl.Flush()
 		}
 		return nil
+	}
+	emit := func(b []byte) error {
+		if !committed {
+			_, _ = pending.Write(b)
+			return nil
+		}
+		return direct(b)
+	}
+	commit := func() error {
+		if committed {
+			return nil
+		}
+		committed = true
+		if pending.Len() == 0 {
+			return nil
+		}
+		b := pending.Bytes()
+		pending.Reset()
+		return direct(b)
+	}
+
+	// writeSSE 原样写出一帧并 flush。
+	writeSSE := func(payload string) error {
+		return emit([]byte("data: " + payload + "\n\n"))
 	}
 
 	// writeRaw 原样写出一帧（绕过 normalizeFrame）。上游 error 帧（error-passthrough）
@@ -680,10 +768,37 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		var obj map[string]any
 		if json.Unmarshal([]byte(payload), &obj) != nil {
 			// 非 JSON 帧：原样降级写出，不计数（与修复前一致）。
+			// 守卫下按「有内容」处理（宁可多提交一次，也不吞掉上游真实字节）。
+			if o.zeroGuard && !committed {
+				visible = true
+				if werr := commit(); werr != nil {
+					return 0, werr
+				}
+			}
 			if werr := writeSSE(payload); werr != nil {
 				return 0, werr
 			}
 			return 0, nil
+		}
+		// 零输出判据采样 + 首可见输出提交（见 WithZeroOutputGuard）：
+		//   - finish_reason 逐帧记录（收尾帧可能就是「零输出的收尾」）；
+		//   - 见到正文/思考/工具分片即 commit —— 此后零输出的可能性消失；
+		//   - 上游 error 帧同样 commit（错误必须让客户端看到，交给既有错误路径）。
+		if o.zeroGuard {
+			if fr := firstFinishReason(obj); fr != "" {
+				zeroFinish = fr
+			}
+			if !visible && frameVisibleOutput(obj) {
+				visible = true
+			}
+			if _, hasErr := obj["error"]; hasErr {
+				zeroErrFrame = true
+			}
+			if (visible || zeroErrFrame) && !committed {
+				if werr := commit(); werr != nil {
+					return 0, werr
+				}
+			}
 		}
 		// 上游错误帧透传（error-passthrough）：带 error 键的帧**原样写出**，不走
 		// normalizeFrame 白名单——白名单会剥掉 error 字段，客户端就看不到上游
@@ -725,12 +840,9 @@ readLoop:
 				return werr
 			}
 		case trimmed != "":
-			// 注释/其他行：原样透传
-			if _, werr := io.WriteString(w, line); werr != nil {
+			// 注释/其他行：原样透传（守卫下同样先进 pending，提交时机由可见输出决定）
+			if werr := emit([]byte(line)); werr != nil {
 				return werr
-			}
-			if fl != nil {
-				fl.Flush()
 			}
 		}
 		// 空行（帧分隔）吞掉：本函数自产 "\n\n"
@@ -753,6 +865,12 @@ readLoop:
 					"delta": map[string]any{"content": tail},
 				}},
 			}
+			if o.zeroGuard && !committed {
+				visible = true // 回吐的残留字节也是可见正文
+				if werr := commit(); werr != nil {
+					return werr
+				}
+			}
 			if werr := writeChunk(tailObj, ""); werr != nil {
 				return werr
 			}
@@ -764,6 +882,13 @@ readLoop:
 			}
 		}
 	}
+	// 零输出守卫（见 errZeroOutput）：一个可见字节都没写过、也没有上游 error 帧，
+	// 但有收尾帧且 finish_reason=length（或上游干脆没给 finish_reason）→ 这是
+	// 「收下请求却零输出」。此刻网关还没写出任何字节，丢弃攒下的空帧并返回哨兵错误，
+	// 调用方换号重发即可，客户端完全无痕（响应头也还没提交）。
+	if o.zeroGuard && !committed && !zeroErrFrame && validFrames > 0 && (zeroFinish == "length" || zeroFinish == "") {
+		return errZeroOutput
+	}
 	// 空流（0 有效帧）：先写一帧 error（绕过 normalizeFrame 原样保留 error 字段），
 	// 再补 [DONE] 保证客户端能正常收尾，并返回非 nil error 供调用方记录。
 	// 网关本地空流兜底帧走 hintFn=nil 的直写路径：该形态未覆盖（不编造 hint），
@@ -772,11 +897,13 @@ readLoop:
 		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
 	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
-	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
-		return err
+	if werr := emit([]byte("data: [DONE]\n\n")); werr != nil {
+		return werr
 	}
-	if fl != nil {
-		fl.Flush()
+	// 提交攒下的字节（守卫开启且始终没有可见输出时，前面所有帧都还在 pending 里）：
+	// 走到这里说明上游确实给了非零输出的响应（或空流错误帧），必须真正送到客户端。
+	if werr := commit(); werr != nil {
+		return werr
 	}
 	if validFrames == 0 {
 		return errEmptyStream
@@ -812,6 +939,55 @@ func attachHintToErrorFrame(payload, hint string) string {
 		return payload
 	}
 	return string(out)
+}
+
+// firstFinishReason 取帧内首个非空 finish_reason（只读，不改帧）。
+// 零输出判据用：只有「收尾帧说了 length、且全程没有一个可见字节」才算零输出。
+func firstFinishReason(obj map[string]any) string {
+	chs, _ := obj["choices"].([]any)
+	for _, ci := range chs {
+		c, _ := ci.(map[string]any)
+		if c == nil {
+			continue
+		}
+		if v, ok := c["finish_reason"].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// frameVisibleOutput 报告这一帧是否带来**客户端可见**的输出：正文 content、思考
+// reasoning_content / reasoning、工具调用分片 tool_calls 任一非空即为真。
+//
+// role 帧、空 delta 帧、usage-only 帧、纯 finish_reason 帧都不算——零输出守卫正是
+// 靠这条判据把「上游只发了壳」与「上游真的说了话」分开（见 errZeroOutput）。
+func frameVisibleOutput(obj map[string]any) bool {
+	chs, _ := obj["choices"].([]any)
+	for _, ci := range chs {
+		c, _ := ci.(map[string]any)
+		if c == nil {
+			continue
+		}
+		d, _ := c["delta"].(map[string]any)
+		if d == nil {
+			// 非流式形态（choices[].message）也按同一口径看一眼。
+			m, ok := c["message"].(map[string]any)
+			if !ok {
+				continue
+			}
+			d = m
+		}
+		for _, k := range []string{"content", "reasoning_content", "reasoning"} {
+			if s, ok := d[k].(string); ok && strings.TrimSpace(s) != "" {
+				return true
+			}
+		}
+		if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // takeFinishReason 取出并删除所有 choice 的 finish_reason，返回第一个非空值。
