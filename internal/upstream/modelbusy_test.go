@@ -108,19 +108,3 @@ func TestModelBusyUpstreamError(t *testing.T) {
 		t.Fatal("传输层失败时应返回错误")
 	}
 }
-
-// TestBusyWarning 只有 busy/congested/unavailable 值得挂色标：
-// idle/normal 是常态，unknown 是「当次没查到」而非不可用，都不能告警。
-func TestBusyWarning(t *testing.T) {
-	warn := map[string]bool{"busy": true, "congested": true, "unavailable": true}
-	for level, want := range warn {
-		if got := BusyWarning(level); got != want {
-			t.Errorf("BusyWarning(%q)=%v want %v", level, got, want)
-		}
-	}
-	for _, level := range []string{"idle", "normal", "unknown", ""} {
-		if BusyWarning(level) {
-			t.Errorf("BusyWarning(%q)=true，want false（不告警）", level)
-		}
-	}
-}

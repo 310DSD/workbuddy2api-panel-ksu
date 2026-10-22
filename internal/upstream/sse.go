@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -34,6 +35,9 @@ func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) 
 // 有收尾，但没有一个字」（请求形态问题）——所以处置也不同：本错误**不罚账号**，
 // 只换号重发一次，全池都撞则如实回 502 + 可行动 hint。
 var errZeroOutput = errors.New("upstream returned zero output (finish_reason=length with empty content)")
+
+// zeroGuardPendingCap 零输出守卫的内存兜底上限（1 MiB）：见 emit 的超限提交逻辑。
+const zeroGuardPendingCap = 1 << 20
 
 // IsZeroOutputError 报告错误是否为「零输出」（见 errZeroOutput）。
 func IsZeroOutputError(err error) bool { return errors.Is(err, errZeroOutput) }
@@ -618,13 +622,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		}
 		return nil
 	}
-	emit := func(b []byte) error {
-		if !committed {
-			_, _ = pending.Write(b)
-			return nil
-		}
-		return direct(b)
-	}
+	// commit 提交攒下的字节（声明在 emit 之前：emit 的超限兜底要调用它）。
 	commit := func() error {
 		if committed {
 			return nil
@@ -635,6 +633,20 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		}
 		b := pending.Bytes()
 		pending.Reset()
+		return direct(b)
+	}
+	emit := func(b []byte) error {
+		if !committed {
+			_, _ = pending.Write(b)
+			// 兜底上限：上游若持续吐「不可见帧」（空 delta / 注释行）而没有一字正文，
+			// pending 会无限增长。超过上限就当作已有真实字节提交——宁可让客户端看到
+			// 一串空壳帧（旧行为），也不允许一个坏上游把网关内存吃满。
+			if pending.Len() > zeroGuardPendingCap {
+				log.Printf("WARN: [upstream] zero-output guard buffer exceeded %d bytes without visible output; committing", zeroGuardPendingCap)
+				return commit()
+			}
+			return nil
+		}
 		return direct(b)
 	}
 

@@ -100,8 +100,8 @@ func TestCompensationListEndpoint(t *testing.T) {
 			if m["end_time"] != "2026-10-22 23:59:59" {
 				t.Errorf("u1 end_time=%v", m["end_time"])
 			}
-			if _, ok := m["hours_left"]; !ok {
-				t.Error("u1 缺 hours_left")
+			if v, ok := m["seconds_left"].(float64); !ok || v <= 0 {
+				t.Errorf("u1 缺 seconds_left 或非正：%v", m["seconds_left"])
 			}
 		case "u2":
 			if m["pending"] != false || m["claimed"] != true {

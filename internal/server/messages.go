@@ -30,9 +30,6 @@ import (
 	"time"
 )
 
-// maxMessagesBody Messages 入站请求体上限（贴图 base64 会很大，与 Responses 同量级）。
-const maxMessagesBody = 32 << 20
-
 // messagesWebsocketUnsupported 回应意外升级探测（Anthropic 无 WS 协议，保持显式）。
 func (h *Handler) messagesWebsocketUnsupported(w http.ResponseWriter, r *http.Request) {
 	writeAnthropicError(w, http.StatusMethodNotAllowed, "invalid_request_error",
@@ -41,7 +38,8 @@ func (h *Handler) messagesWebsocketUnsupported(w http.ResponseWriter, r *http.Re
 
 // messages 处理 POST /v1/messages 与 POST /messages。
 func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxMessagesBody))
+	// 与 chat 主通道同口径：不做网关侧请求体上限（大上下文/多图由上游裁决）。
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "read body: "+err.Error())
 		return
@@ -262,6 +260,16 @@ func anthropicBlocksToMessages(role string, blocks []any) []any {
 	}
 	flushText()
 	if len(toolCalls) > 0 {
+		// assistant 的「正文 + tool_use」必须落在**同一条**消息里：拆成两条
+		// consecutive assistant 会被上游拒绝（或让模型看不到自己说过的话）。
+		// OpenAI 的 assistant 消息本就允许 content 与 tool_calls 并存。
+		if role == "assistant" && len(out) > 0 {
+			if last, ok := out[len(out)-1].(map[string]any); ok &&
+				last["role"] == "assistant" && last["tool_calls"] == nil {
+				last["tool_calls"] = toolCalls
+				return out
+			}
+		}
 		out = append(out, map[string]any{"role": "assistant", "content": nil, "tool_calls": toolCalls})
 	}
 	if len(out) == 0 {
@@ -656,14 +664,30 @@ func (w *anthropicWriter) emitCompleted() {
 		stop = "end_turn"
 	}
 	out := int64(0)
+	in := int64(0)
+	usage := map[string]any{}
 	if u := w.x.usage; u != nil {
 		if v, ok := u["completion_tokens"].(float64); ok {
 			out = int64(v)
 		}
+		if v, ok := u["prompt_tokens"].(float64); ok {
+			in = int64(v)
+		}
+		if d, ok := u["prompt_tokens_details"].(map[string]any); ok {
+			if c, ok := d["cached_tokens"].(float64); ok && c > 0 {
+				usage["cache_read_input_tokens"] = int64(c)
+			}
+		}
+	}
+	// message_start 的 input_tokens 只能是 0（上游 usage 在末帧才到），这里补上真实值：
+	// 比 Anthropic 原生多一个字段，但客户端按需读取，不会因为多字段出错。
+	usage["output_tokens"] = out
+	if in > 0 {
+		usage["input_tokens"] = in
 	}
 	w.emit("message_delta", map[string]any{
 		"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
-		"usage": map[string]any{"output_tokens": out},
+		"usage": usage,
 	})
 	w.emit("message_stop", map[string]any{})
 	w.x.done = true
@@ -709,12 +733,43 @@ func (w *anthropicWriter) finish() {
 			if w.x.started {
 				w.emitCompleted()
 			} else {
-				w.emitError(map[string]any{"message": "upstream returned no data", "type": "upstream_error"})
+				// 首帧前失败（chat 管道写出的是 JSON 错误）：按原状态码转成 Anthropic
+				// 错误信封。伪装成 200 + error 事件会让 Claude Code 的退避/换号逻辑失效。
+				w.flushErrorPassthrough()
 			}
 		}
 		return
 	}
 	w.flushJSON()
+}
+
+// flushErrorPassthrough 流式请求在首帧前失败：保留状态码，body 转 Anthropic 错误信封。
+func (w *anthropicWriter) flushErrorPassthrough() {
+	status := w.status
+	if status == 0 {
+		status = http.StatusInternalServerError
+	}
+	body := bytes.TrimSpace(w.body.Bytes())
+	msg := ""
+	var obj map[string]any
+	if len(body) > 0 && json.Unmarshal(body, &obj) == nil {
+		if e, ok := obj["error"].(map[string]any); ok {
+			msg, _ = e["message"].(string)
+			if hint, ok := e["gateway_hint"].(string); ok && hint != "" {
+				msg += " (" + hint + ")"
+			}
+		}
+	}
+	if msg == "" {
+		msg = "upstream returned no data"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.inner.WriteHeader(status)
+	raw, _ := json.Marshal(map[string]any{
+		"type":  "error",
+		"error": map[string]any{"type": anthropicErrorType(status), "message": msg},
+	})
+	_, _ = w.inner.Write(raw)
 }
 
 // flushJSON 非流式：chat.completion → Anthropic message；错误信封 → Anthropic error。

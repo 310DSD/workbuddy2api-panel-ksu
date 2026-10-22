@@ -408,9 +408,11 @@ func (p *Panel) attachModelBusy(entries []map[string]any) {
 		if acct == nil {
 			continue
 		}
-		m, err := p.cfg.Upstream.ModelBusy(acct, models)
-		if err != nil || len(m) == 0 {
-			continue // 观测失败：不填（unknown ≠ unavailable）
+		// 分批查询可能「部分成功」：err != nil 时仍可能有已解析的模型，能填就填
+		// （拿不到的自然缺字段，与 unknown 同待遇——不展示成不可用）。
+		m, _ := p.cfg.Upstream.ModelBusy(acct, models)
+		if len(m) == 0 {
+			continue
 		}
 		levels[realm] = m
 	}

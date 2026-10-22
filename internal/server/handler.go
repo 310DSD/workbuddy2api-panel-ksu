@@ -156,7 +156,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 请求级观测（流水行 + 归档）覆盖所有推理入口：chat.completions / responses / messages。
 	// 三个入口最终都走 chatCompletions，trace 经 context 传下去，不会重复记两条。
 	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && isInferencePath(r.URL.Path) {
-		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now()}
+		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now(), path: r.URL.Path}
 		if h.loadLive().RecordClientInfo {
 			trace.captureClientInfo(r)
 		}
@@ -180,7 +180,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // isInferencePath 报告该路径是否为推理入口（需要请求级观测包装）。
 func isInferencePath(path string) bool {
 	switch path {
-	case "/v1/chat/completions", "/v1/responses", "/v1/messages":
+	case "/v1/chat/completions", "/v1/responses", "/v1/messages", "/messages":
 		return true
 	}
 	return false
@@ -269,7 +269,8 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		// credit_floor 生效的积分保底值（0 = 关闭）。与 accounts[].credits +
 		// model_costs 对照即可判定「某号为何对某模型不出票」。零值也显式写出
 		// （运维口径：缺失会让人误以为没记录）。
-		"credit_floor": h.cfg.Pool.CreditFloor(),
+		"credit_floor":    h.cfg.Pool.CreditFloor(),
+		"reserve_credits": h.cfg.Pool.ReserveCredits(),
 		// cost_explore 事件与 per-model 时间戳（时间值由 encoding/json 写 RFC3339）。
 		"cost_explore": map[string]any{
 			"events_total": exploreEvents,
@@ -1217,7 +1218,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 回 502 + 可行动 hint。它不是账号健康问题（不罚号）、也不是可重试的服务端过载
 	// （别混进 no_healthy_account 让客户端无脑重试）——真正该做的是缩短输入、调大
 	// max_tokens 或换模型。
-	if zeroOutputs > 0 {
+	// 仅在「最后一跳也是零输出」时才用这个终局：若零输出之后又撞上别的失败
+	// （402/429/超时），那个失败才是最后事实，不能被零输出文案盖掉。
+	if zeroOutputs > 0 && lastErr == nil {
 		writeOpenAIErrorHint(w, http.StatusBadGateway, "zero_output_length",
 			"every attempt returned an empty response (finish_reason=length with no content, reasoning or tool calls)",
 			"zero_output: the input likely exceeds the model's real context window (declared context_length may be overstated), or max_tokens is too small for the reasoning budget; shorten the input, raise max_tokens, or switch model")

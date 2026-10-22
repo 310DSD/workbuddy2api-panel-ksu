@@ -144,3 +144,26 @@ func TestIsZeroOutputResponse(t *testing.T) {
 		t.Fatal("IsZeroOutputError 判定异常")
 	}
 }
+
+// TestZeroOutputGuardBufferCap 兜底上限：上游持续吐「不可见帧」时不得无限攒内存。
+// 超过 zeroGuardPendingCap 后按「已有真实字节」提交，返回 nil（旧行为），
+// 而不是继续缓冲到零输出判定、更不是 OOM。
+func TestZeroOutputGuardBufferCap(t *testing.T) {
+	frame := "data: {\"choices\":[{\"index\":0,\"delta\":{}}]}\n\n"
+	n := zeroGuardPendingCap/len(frame) + 100
+	var b strings.Builder
+	b.Grow(n * len(frame))
+	for i := 0; i < n; i++ {
+		b.WriteString(frame)
+	}
+	b.WriteString("data: [DONE]\n\n")
+
+	rec := httptest.NewRecorder()
+	err := StreamHint(rec, strings.NewReader(b.String()), nil, WithZeroOutputGuard())
+	if err != nil {
+		t.Fatalf("超限后应提交并返回 nil（旧行为），got %v", err)
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatal("超限提交后客户端必须收到字节")
+	}
+}

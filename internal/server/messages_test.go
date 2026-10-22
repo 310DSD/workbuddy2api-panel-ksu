@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
 
 // TestMessagesToChatTranslation 请求翻译：system（string/blocks）、text/image/tool_use/
@@ -347,5 +348,62 @@ func TestMessagesErrorEnvelope(t *testing.T) {
 	}
 	if got.Type != "error" || got.Error.Type == "" || got.Error.Message == "" {
 		t.Fatalf("错误信封不完整：%s", rec.Body.String())
+	}
+}
+
+// TestMessagesAssistantTextWithToolUseSingleMessage assistant 的「正文 + tool_use」
+// 必须合成一条消息（content + tool_calls）；拆成两条 consecutive assistant 会被上游拒绝。
+func TestMessagesAssistantTextWithToolUseSingleMessage(t *testing.T) {
+	src := `{"model":"m","max_tokens":8,"messages":[
+	  {"role":"user","content":"hi"},
+	  {"role":"assistant","content":[{"type":"text","text":"我来读"},{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"/a"}}]}
+	]}`
+	raw, _, err := messagesToChat([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chat struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &chat); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Messages) != 2 {
+		t.Fatalf("messages=%d want 2（user + 合并后的 assistant）：%+v", len(chat.Messages), chat.Messages)
+	}
+	asst := chat.Messages[1]
+	if asst["role"] != "assistant" || asst["content"] != "我来读" {
+		t.Fatalf("assistant 消息=%+v", asst)
+	}
+	tcs, _ := asst["tool_calls"].([]any)
+	if len(tcs) != 1 {
+		t.Fatalf("正文与 tool_calls 未合并到同一条消息：%+v", asst)
+	}
+}
+
+// TestMessagesStreamErrorKeepsHTTPStatus 流式请求在首帧前失败：保留状态码 +
+// Anthropic 错误信封（不能是 200 + error 事件）。
+func TestMessagesStreamErrorKeepsHTTPStatus(t *testing.T) {
+	p := pool.New("")
+	h := NewHandler(Config{Pool: p, Upstream: newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, "data: [DONE]\n\n", true
+	})})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"m","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d want 503 body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("必须是 Anthropic 错误信封：%v (%s)", err, rec.Body.String())
+	}
+	if got.Type != "error" || got.Error.Type != "api_error" {
+		t.Errorf("信封=%+v", got)
 	}
 }

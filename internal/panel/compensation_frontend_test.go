@@ -41,19 +41,19 @@ vm.runInContext(src.slice(durStart, durEnd) + src.slice(escStart, escEnd) + src.
 
 const txt = r => ctx.compStatusText(r).text;
 ctx.renderCompensation({ pending: 2, failed: 1, accounts: [
-  { uid: 'u1', nickname: '一号', active: true, claimed: false, credit_num: 500, end_time: '2026-10-22 23:59:59', hours_left: 30, pending: true },
-  { uid: 'u2', nickname: '二号', active: true, claimed: true, credit_num: 500, hours_left: -1, pending: false },
-  { uid: 'u3', nickname: '三号', error: 'status 401', hours_left: -1, pending: false },
-  { uid: 'u4', active: true, claimed: false, credit_num: 0, hours_left: -1, pending: false },
-  { uid: 'u5', active: false, claimed: false, credit_num: 0, hours_left: -1, pending: false },
+  { uid: 'u1', nickname: '一号', active: true, claimed: false, credit_num: 500, end_time: '2026-10-22 23:59:59', seconds_left: 108000, pending: true },
+  { uid: 'u2', nickname: '二号', active: true, claimed: true, credit_num: 500, seconds_left: 0, pending: false },
+  { uid: 'u3', nickname: '三号', error: 'status 401', seconds_left: 0, pending: false },
+  { uid: 'u4', active: true, claimed: false, credit_num: 0, seconds_left: 0, pending: false },
+  { uid: 'u5', active: false, claimed: false, credit_num: 0, seconds_left: 0, pending: false },
 ]});
 const html = host.innerHTML;
 process.stdout.write(JSON.stringify({
   pendingBtn: (html.match(/data-comp=/g) || []).length,
-  claimText: txt({ active: true, claimed: false, credit_num: 500, end_time: '2026-10-22 23:59:59', hours_left: 30 }).includes('可领'),
-  soonRed: ctx.compStatusText({ active: true, claimed: false, credit_num: 1, hours_left: 30 }).cls === 'var(--bad)',
-  farAmber: ctx.compStatusText({ active: true, claimed: false, credit_num: 1, hours_left: 200 }).cls === 'var(--warn)',
-  expired: txt({ active: true, claimed: false, credit_num: 1, hours_left: -1, expired: true }).includes('已过期'),
+  claimText: txt({ active: true, claimed: false, credit_num: 500, end_time: '2026-10-22 23:59:59', seconds_left: 108000 }).includes('可领'),
+  soonRed: ctx.compStatusText({ active: true, claimed: false, credit_num: 1, seconds_left: 108000 }).cls === 'var(--bad)',
+  farAmber: ctx.compStatusText({ active: true, claimed: false, credit_num: 1, seconds_left: 720000 }).cls === 'var(--warn)',
+  expired: txt({ active: true, claimed: false, credit_num: 1, seconds_left: 0, expired: true }).includes('已过期'),
   claimed: txt({ active: true, claimed: true, credit_num: 500 }).includes('已领取'),
   noActivity: txt({ active: false }).includes('无补偿活动'),
   errorShown: html.includes('查询失败'),

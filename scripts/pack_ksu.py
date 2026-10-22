@@ -4,18 +4,49 @@
 写过反斜杠条目（bin\\wb2api），Android 的刷机脚本解不出来（上一轮真踩）。这里用
 zipfile 显式构造正斜杠条目，条目顺序与时间戳固定 → 产物可复现、digest 稳定。
 
-用法：python scripts/pack_ksu.py <src_dir> <out_zip>
+版本号与 versionCode 一律从 kernelsu/module.prop 读取（单一事实源），避免打包脚本
+里再硬编码一份、发版时漂移。
+
+用法：python scripts/pack_ksu.py [src_dir] [out_zip]
 """
 
 import hashlib
 import os
+import re
 import sys
 import zipfile
 
 DEFAULT_SRC = "kernelsu"
-DEFAULT_OUT = "dist/wb2api_panel-v1.13.0-ksu-11300-arm64.zip"
 # 固定时间戳：同内容 → 同字节，便于对账（不参与任何运行时语义）。
 FIXED_DATE = (2026, 10, 22, 18, 0, 0)
+
+
+def read_module_prop(src: str) -> tuple[str, str]:
+    """从 module.prop 读 (version, versionCode)。
+
+    version 形如 v1.13.1-ksu；产物名沿用 wb2api_panel-<version>-<code>-arm64.zip。
+    """
+    prop = os.path.join(src, "module.prop")
+    version, code = "", ""
+    with open(prop, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line.startswith("version="):
+                version = line.split("=", 1)[1].strip()
+            elif line.startswith("versionCode="):
+                code = line.split("=", 1)[1].strip()
+    if not version or not code:
+        raise SystemExit(f"{prop}: 缺 version / versionCode")
+    if not re.fullmatch(r"v[0-9A-Za-z._-]+", version):
+        raise SystemExit(f"{prop}: version 形态异常：{version!r}")
+    if not code.isdigit():
+        raise SystemExit(f"{prop}: versionCode 必须是数字：{code!r}")
+    return version, code
+
+
+def default_out(src: str) -> str:
+    version, code = read_module_prop(src)
+    return f"dist/wb2api_panel-{version}-{code}-arm64.zip"
 
 
 def build(src: str, out: str) -> None:
@@ -61,5 +92,5 @@ def build(src: str, out: str) -> None:
 
 if __name__ == "__main__":
     src = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SRC
-    out = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_OUT
+    out = sys.argv[2] if len(sys.argv) > 2 else default_out(src)
     build(src, out)

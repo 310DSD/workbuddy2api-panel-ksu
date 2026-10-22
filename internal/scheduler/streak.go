@@ -40,31 +40,8 @@ func (s *Scheduler) RunStreakBonusNow() {
 func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 	// 0. 补签保连登：昨日漏签且有补签卡则补上（连续天数一断就要重攒 7 天）。
 	s.makeupYesterday(a)
-	// 0.5 礼包/补偿：**先查状态再领**。
-	//
-	// 盲领的病根：无活动 / 已领过时上游仍回 code=0 且 body 无 credit，领取函数返回
-	// (0, nil)，日志里就多一行假的「+0c」成功行；而真正的失败（401/5xx/网络）反倒
-	// 无痕（global 号打 CN billing 端点恒 401）。补偿还带领取截止日，签到停摆就会
-	// 静默过期——所以状态查询失败时**不领**（宁缺一行日志，也不制造假成功），失败
-	// 本身在日志里显形。
-	if st, err := s.cfg.Upstream.GetGiftStatus(a); err != nil {
-		log.Printf("streak-bonus %s: 礼包状态查询失败：%v", logfmt.Label(a.UID, a.Nickname), err)
-	} else if st.Pending() {
-		if credit, cerr := s.cfg.Upstream.ClaimGift(a); cerr == nil {
-			log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc", logfmt.Label(a.UID, a.Nickname), credit)
-		} else {
-			log.Printf("streak-bonus %s: 礼包领取失败：%v", logfmt.Label(a.UID, a.Nickname), cerr)
-		}
-	}
-	if st, err := s.cfg.Upstream.GetCompensationStatus(a); err != nil {
-		log.Printf("streak-bonus %s: 补偿状态查询失败：%v", logfmt.Label(a.UID, a.Nickname), err)
-	} else if st.Pending() {
-		if credit, cerr := s.cfg.Upstream.ClaimCompensation(a); cerr == nil {
-			log.Printf("streak-bonus %s: 🎊 补偿领取 +%dc（截止 %s）", logfmt.Label(a.UID, a.Nickname), credit, st.EndTime)
-		} else {
-			log.Printf("streak-bonus %s: 补偿领取失败：%v", logfmt.Label(a.UID, a.Nickname), cerr)
-		}
-	}
+	// 0.5 礼包/补偿：先查状态再领（见 claimBenefits）。
+	s.claimBenefits(a)
 
 	full, err := s.cfg.Upstream.GrowthStreakFull(a)
 	if err != nil {
@@ -134,4 +111,41 @@ func (s *Scheduler) makeupYesterday(a *auth.Auth) {
 		return
 	}
 	log.Printf("streak-bonus %s: ★ 已用补签卡补签 %s（保连登）", logfmt.Label(a.UID, a.Nickname), yesterday)
+}
+
+// claimBenefits 礼包 / 官方补偿：先查状态再领。
+//
+// 盲领的病根：无活动 / 已领过时上游仍回 code=0 且 body 无 credit，领取函数返回
+// (0, nil)，日志里就多一行假的「+0c」成功行；而真正的失败（401/5xx/网络，
+// global 号打 CN billing 恒 401）反倒无痕。补偿还带领取截止日，签到停摆就会静默过期。
+//
+// 状态查询失败时的取舍：**回退盲领一次**，而不是直接放弃。查询接口本身也可能
+// 因为上游改版 / 域差异而挂——若因此停止领取，用户会静默丢掉礼物与补偿（比多一行
+// 假日志严重得多）。回退路径在日志里明确标注，运维能区分「没活动」与「查不到」。
+func (s *Scheduler) claimBenefits(a *auth.Auth) {
+	if st, err := s.cfg.Upstream.GetGiftStatus(a); err != nil {
+		log.Printf("streak-bonus %s: 礼包状态查询失败（回退盲领一次）：%v", logfmt.Label(a.UID, a.Nickname), err)
+		if credit, cerr := s.cfg.Upstream.ClaimGift(a); cerr == nil && credit > 0 {
+			log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc", logfmt.Label(a.UID, a.Nickname), credit)
+		}
+	} else if st.Pending() {
+		if credit, cerr := s.cfg.Upstream.ClaimGift(a); cerr == nil {
+			log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc", logfmt.Label(a.UID, a.Nickname), credit)
+		} else {
+			log.Printf("streak-bonus %s: 礼包领取失败：%v", logfmt.Label(a.UID, a.Nickname), cerr)
+		}
+	}
+
+	if st, err := s.cfg.Upstream.GetCompensationStatus(a); err != nil {
+		log.Printf("streak-bonus %s: 补偿状态查询失败（回退盲领一次）：%v", logfmt.Label(a.UID, a.Nickname), err)
+		if credit, cerr := s.cfg.Upstream.ClaimCompensation(a); cerr == nil && credit > 0 {
+			log.Printf("streak-bonus %s: 🎊 补偿领取 +%dc", logfmt.Label(a.UID, a.Nickname), credit)
+		}
+	} else if st.Pending() {
+		if credit, cerr := s.cfg.Upstream.ClaimCompensation(a); cerr == nil {
+			log.Printf("streak-bonus %s: 🎊 补偿领取 +%dc（截止 %s）", logfmt.Label(a.UID, a.Nickname), credit, st.EndTime)
+		} else {
+			log.Printf("streak-bonus %s: 补偿领取失败：%v", logfmt.Label(a.UID, a.Nickname), cerr)
+		}
+	}
 }

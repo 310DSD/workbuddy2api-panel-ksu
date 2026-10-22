@@ -3009,11 +3009,11 @@ function compStatusText(r) {
   if (!r.active) return { cls: 'var(--ink-3)', text: '当前无补偿活动' };
   if (r.claimed) return { cls: 'var(--ok)', text: '已领取' };
   if (!r.credit_num) return { cls: 'var(--ink-3)', text: '活动在但无可领额度' };
-  const left = r.hours_left;
+  const left = r.seconds_left; // 精确秒：dur() 渲染成「x时y分」，避免小时取整把 1 秒说成 1 小时
   const deadline = r.end_time ? '截止 ' + esc(r.end_time) : '无截止时间';
-  const tail = r.expired ? ' · 已过期' : (left == null || left < 0 ? '' : ' · 剩 ' + dur(left * 3600));
+  const tail = r.expired ? ' · 已过期' : (left > 0 ? ' · 剩 ' + dur(left) : '');
   return {
-    cls: left != null && left >= 0 && left <= 48 ? 'var(--bad)' : 'var(--warn)',
+    cls: left > 0 && left <= 48 * 3600 ? 'var(--bad)' : 'var(--warn)',
     text: '可领 ' + fmtTok(r.credit_num) + 'c · ' + deadline + tail,
   };
 }

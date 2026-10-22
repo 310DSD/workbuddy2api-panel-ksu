@@ -36,10 +36,10 @@ type compensationRow struct {
 	Claimed    bool   `json:"claimed"`
 	CreditNum  int64  `json:"credit_num"`
 	EndTime    string `json:"end_time,omitempty"`
-	// HoursLeft 距领取截止的小时数（向上取整）；end_time 缺失 / 解析失败 / 已过期均为 -1，
-	// ≤48 由前端标红（补偿通常只挂几天）。
-	HoursLeft int `json:"hours_left"`
-	// Expired 领取截止已过。单列一个布尔而不是靠 hours_left 的负值推断：
+	// SecondsLeft 距领取截止的秒数（精确值，前端用 dur() 渲染成「x时y分」）；
+	// end_time 缺失 / 解析失败 / 已过期恒为 0。≤48h 由前端标红（补偿通常只挂几天）。
+	SecondsLeft int64 `json:"seconds_left"`
+	// Expired 领取截止已过。单列一个布尔而不是靠 seconds_left 的负值推断：
 	// 「未知」与「已过期」的处置完全不同，粘在一个数字里前端必然误读。
 	Expired bool   `json:"expired,omitempty"`
 	Error   string `json:"error,omitempty"`
@@ -56,7 +56,6 @@ func (p *Panel) compensationRow(a *auth.Auth, st pool.Status) compensationRow {
 		Realm:      st.Realm,
 		Enterprise: st.Enterprise,
 		Disabled:   st.Disabled,
-		HoursLeft:  -1,
 	}
 	if a == nil || a.AccessTokenValue() == "" {
 		row.Error = "账号无可用凭证"
@@ -77,7 +76,7 @@ func (p *Panel) compensationRow(a *auth.Auth, st pool.Status) compensationRow {
 			if t.Before(time.Now()) {
 				row.Expired = true
 			} else {
-				row.HoursLeft = int(time.Until(t).Hours() + 0.999)
+				row.SecondsLeft = int64(time.Until(t).Seconds())
 			}
 		}
 	}

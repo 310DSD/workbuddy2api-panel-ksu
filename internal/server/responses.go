@@ -43,7 +43,10 @@ func (h *Handler) responsesWebsocketUnsupported(w http.ResponseWriter, r *http.R
 
 // responses 处理 POST /v1/responses。
 func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxResponsesBody))
+	// 与 chat 主通道同口径：请求体不做网关侧上限（README/上游对齐口径），
+	// 超限类问题交由上游自然响应；此处不能比主通道更严，否则大上下文/多图请求
+	// 会在适配层被拒，表现为「同一个请求换个协议就失败」。
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
@@ -68,10 +71,6 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	h.chatCompletions(rw, r2)
 }
 
-// maxResponsesBody 入站请求体上限（Responses 的 input 数组比 chat 的 messages 更啰嗦，
-// 留 32 MiB；与面板导入、chat 主体上限同量级）。
-const maxResponsesBody = 32 << 20
-
 // modelBare 去掉网关路由前缀（cn:/global:），供 response 对象回显裸 model 名。
 func modelBare(model string) string {
 	if _, bare := resolveModel(model); bare != "" {
@@ -92,9 +91,11 @@ func responsesToChat(src []byte) ([]byte, error) {
 	}
 	out := map[string]any{}
 	// 直接透传的字段：语义与 chat.completions 完全一致。
+	// 只透传 chat.completions 也有的字段：Responses 的 metadata 在 chat 协议里
+	// 没有定义，透传只会让上游多收一个未知键（部分版本会直接 400 参数错误）。
 	for _, k := range []string{
 		"model", "stream", "stream_options", "temperature", "top_p", "user", "n",
-		"stop", "metadata", "parallel_tool_calls", "prompt_cache_key",
+		"stop", "parallel_tool_calls", "prompt_cache_key",
 	} {
 		if v, ok := obj[k]; ok && v != nil {
 			out[k] = v
@@ -842,13 +843,38 @@ func (w *responsesWriter) finish() {
 			if w.x.started {
 				w.emitCompleted()
 			} else {
-				// 一帧都没有（chat 管道在开流前就失败了）：按错误透出。
-				w.emitFailed(map[string]any{"message": "upstream returned no data", "type": "upstream_error"})
+				// 一帧 SSE 都没开始：chat 管道大概率在开流前就失败了，写出的是 JSON
+				// 错误信封。按原状态码/原文透出——把 400/429/503 降级成「200 +
+				// response.failed」会让客户端误判可重试性（Codex 依赖 HTTP 码决定
+				// 重试/换模型），也丢掉了 gateway_hint。
+				w.flushErrorPassthrough()
 			}
 		}
 		return
 	}
 	w.flushJSON()
+}
+
+// flushErrorPassthrough 流式请求在首帧前失败：把 JSON 错误按原状态码透出，
+// 而不是伪装成 200 的 SSE 事件。body 不是 JSON 时包一层标准错误信封。
+func (w *responsesWriter) flushErrorPassthrough() {
+	status := w.status
+	if status == 0 {
+		status = http.StatusInternalServerError
+	}
+	body := bytes.TrimSpace(w.body.Bytes())
+	w.Header().Set("Content-Type", "application/json")
+	var obj map[string]any
+	if len(body) > 0 && json.Unmarshal(body, &obj) == nil {
+		w.inner.WriteHeader(status)
+		_, _ = w.inner.Write(body)
+		return
+	}
+	w.inner.WriteHeader(status)
+	raw, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"message": "upstream returned no data", "type": "upstream_error", "code": "upstream_parse",
+	}})
+	_, _ = w.inner.Write(raw)
 }
 
 // flushJSON 非流式：chat.completion（或错误信封）→ response 对象。

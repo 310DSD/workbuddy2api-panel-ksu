@@ -344,7 +344,10 @@ type requestTraceKey struct{}
 type requestTrace struct {
 	id    string
 	start time.Time
-	stat  *chatStat
+	// path 入站入口路径（/v1/chat/completions、/v1/responses、/v1/messages…）：
+	// 归档事件据此区分客户端协议，而不是把 Codex/Claude 的流量都记成 chat。
+	path string
+	stat *chatStat
 	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
 	clientIP  string
 	userAgent string
@@ -397,10 +400,14 @@ func requestTraceFrom(r *http.Request) *requestTrace {
 }
 
 func (t *requestTrace) event(status int) reqlog.Event {
+	path := t.path
+	if path == "" {
+		path = "/v1/chat/completions" // 兼容未设置 path 的旧调用/测试
+	}
 	e := reqlog.Event{
 		Time:      t.start,
 		RequestID: t.id,
-		Path:      "/v1/chat/completions",
+		Path:      path,
 		Status:    status,
 	}
 	duration := time.Since(t.start)

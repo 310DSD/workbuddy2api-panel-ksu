@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
 
 // respEvents 解析 Responses SSE 输出为 [(eventType, payload)]。
@@ -375,5 +376,35 @@ func TestResponsesErrorPassthrough(t *testing.T) {
 	}
 	if got.Error.Code == "" {
 		t.Errorf("error.code 不能为空：%s", rec.Body.String())
+	}
+}
+
+// TestResponsesStreamErrorKeepsHTTPStatus 流式请求在首帧前失败（无可用账号）：
+// 必须保留原 HTTP 状态码与 JSON 错误信封，不能伪装成「200 + response.failed」——
+// Codex 依赖 HTTP 码决定重试/换模型。
+func TestResponsesStreamErrorKeepsHTTPStatus(t *testing.T) {
+	p := pool.New("") // 空池：选号必失败
+	h := NewHandler(Config{Pool: p, Upstream: newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, "data: [DONE]\n\n", true
+	})})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses",
+		strings.NewReader(`{"model":"glm-5.2","input":"hi","stream":true}`)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d want 503（流式失败必须保留 HTTP 状态）body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Header().Get("Content-Type"), "application/json") {
+		t.Errorf("Content-Type=%q want application/json（不是 SSE）", rec.Header().Get("Content-Type"))
+	}
+	var got struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("body 必须是 JSON 错误信封：%v (%s)", err, rec.Body.String())
+	}
+	if got.Error.Code != "no_healthy_account" {
+		t.Errorf("code=%q want no_healthy_account", got.Error.Code)
 	}
 }

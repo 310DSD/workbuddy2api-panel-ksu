@@ -68,14 +68,3 @@ func (c *Client) ModelBusy(a *auth.Auth, models []string) (map[string]string, er
 	}
 	return out, nil
 }
-
-// BusyWarning 报告繁忙度是否值得在面板挂色标。
-// 只对 busy / congested / unavailable 告警：idle / normal 是常态（挂色标等于满屏噪音），
-// unknown 是「当次没查到」而非「不可用」，同样不告警。
-func BusyWarning(level string) bool {
-	switch level {
-	case "busy", "congested", "unavailable":
-		return true
-	}
-	return false
-}
