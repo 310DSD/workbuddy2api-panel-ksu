@@ -470,7 +470,14 @@ function renderModelLocks(rows) {
     if (note) note.textContent = '';
     return;
   }
-  const STATE = { locked: ['bad', '整池不可用'], starved: ['warn', '没号可用'], partial: ['warn', '部分限流'] };
+  // unavailable：>=2 个不同账号被上游明确回 11102 —— 模型整体下架（等不到，只能换模型）；
+  // locked：全部号都被该模型冷却挡住（限流/冷却，等就有）。两者处置完全不同，不能合并。
+  const STATE = {
+    unavailable: ['bad', '整体不可用'],
+    locked: ['bad', '整池不可用'],
+    starved: ['warn', '没号可用'],
+    partial: ['warn', '部分限流'],
+  };
   const left = iso => {
     const ms = parseAPITime(iso);
     return ms ? dur(Math.max(0, Math.round((ms - Date.now()) / 1000))) : '—';
@@ -490,8 +497,10 @@ function renderModelLocks(rows) {
       '</tr>';
   }).join('');
   if (note) {
+    const un = rows.filter(r => r.state === 'unavailable').length;
     const bad = rows.filter(r => r.state === 'locked' || r.state === 'starved').length;
-    note.textContent = bad ? bad + ' 个模型整池不可用' : rows.length + ' 个模型部分限流';
+    note.textContent = un ? un + ' 个模型整体不可用（上游 11102，换个模型）'
+      : (bad ? bad + ' 个模型整池不可用' : rows.length + ' 个模型部分限流');
   }
 }
 

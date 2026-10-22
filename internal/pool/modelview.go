@@ -26,6 +26,10 @@ type ModelLockRow struct {
 	// Locked 因该模型自身冷却被挡的账号数。
 	Locked int `json:"locked"`
 	// State 聚合状态：
+	//   - unavailable：>=2 个不同账号被上游**明确**回 11102（见 modelunavail.go）
+	//               ——模型整体下架，网关在打上游之前就拒（400 model_unavailable），
+	//               并把该模型从 /v1/models 摘除。与 locked 的区别：locked 是限流/
+	//               冷却（等就有），本状态是「等不到」，只能换模型或等上游恢复；
 	//   - locked  ：全部参与选号的账号都被该模型冷却挡住（换模型或等解锁才有用，
 	//               与 ModelBlocked 的 Blocked 同口径）；
 	//   - starved ：此刻没有号能服务，但不是模型冷却造成的（账号级冷却/熔断/在途占满）
@@ -120,6 +124,13 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 				row.Servable++
 			}
 		}
+		// 整体不可用优先：证据来自上游明示（>=2 个账号 11102），比「还有号能服务」
+		// 更强——后者可能只是那两个号恰好没被点到。
+		if n, _, _ := p.modelUnavailCountLocked(realm, model, now); n >= modelUnavailMinAccounts {
+			row.State = "unavailable"
+			out = append(out, row)
+			continue
+		}
 		switch {
 		case row.Servable > 0:
 			row.State = "partial"
@@ -134,12 +145,14 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 
 	rank := func(state string) int {
 		switch state {
-		case "locked":
+		case "unavailable":
 			return 0
-		case "starved":
+		case "locked":
 			return 1
-		default:
+		case "starved":
 			return 2
+		default:
+			return 3
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {

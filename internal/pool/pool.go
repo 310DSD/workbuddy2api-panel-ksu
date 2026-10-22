@@ -57,6 +57,10 @@ type Pool struct {
 	// 任务（签到/猫猫旅行本身赚积分），充值回血后自动恢复。两者可同时配置，通常
 	// reserve 应 <= floor。
 	reserveCredits int64
+	// unavailProbe 整体不可用模型的「探针窗口」记录：key = realm+"\x1f"+model，
+	// value = 上次放行探针的时刻（运行态，不落盘——重启清零只会让每个被判死的
+	// 模型多探一次，代价可忽略；证据本身由各账号的 11102 台账持久承载）。
+	unavailProbe map[string]time.Time
 	// modelRateOf 按 (realm, 模型) 查上游目录积分倍率（"0.79" / "" = 未知）。
 	// 由 main 用 upstream.Client.ModelRate 注入——pool 不依赖 upstream 包（避免
 	// 循环依赖与分层破坏），nil 时倍率兜底不生效（退化为仅本地台账判定）。
@@ -108,6 +112,7 @@ func New(stateFp string) *Pool {
 		// config 显式 "0" 关停（SetCostExploreInterval(0)）。
 		costExploreInterval: defaultCostExploreInterval,
 		exploreLast:         map[string]time.Time{},
+		unavailProbe:        map[string]time.Time{},
 	}
 	if stateFp != "" {
 		p.load()

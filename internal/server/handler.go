@@ -359,7 +359,14 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 // 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底。
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
+	// 整体不可用模型（pool/modelunavail.go）：>=2 个账号被上游明确回 11102 的模型
+	// 不再出现在名单里——列出它只会让客户端选到一个必然失败的模型。恢复靠
+	// 任一账号实测成功（清台账）或探针请求，均自动生效。
+	unavail := h.cfg.Pool.UnavailableModelSet()
 	for _, mi := range h.fetchDynamicModels() {
+		if unavail["cn:"+mi.ID] {
+			continue
+		}
 		entry := map[string]any{
 			"id":       "cn:" + mi.ID,
 			"object":   "model",
@@ -403,6 +410,9 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		globalEfforts, globalDefaults := h.cfg.Upstream.GlobalEffortSnapshot()
 		for _, id := range globalIDs {
+			if unavail["global:"+id] {
+				continue
+			}
 			entry := map[string]any{
 				"id":       "global:" + id,
 				"object":   "model",
@@ -556,6 +566,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
 	// 默认零值 Blocked=false = 按既有的"没有可用账号"口径报错。
 	var modelBlock pool.ModelBlockStatus
+
+	// 整体不可用模型（见 pool/modelunavail.go）：同一 realm 已有 >=2 个不同账号被
+	// 上游**明确**回 11102 → 在打上游之前就拒，省掉「每个号都白撞一次」的代价。
+	// 每 modelUnavailProbeGap 放行一个探针请求验证上游是否恢复（成功会自动清账）。
+	// 用 400 而非 503：换号重试必然同样失败，该做的是换模型。
+	if un, blocked := h.cfg.Pool.ModelUnavailableFor(realm, bareModel); blocked {
+		writeOpenAIErrorHint(w, http.StatusBadRequest, "model_unavailable",
+			fmt.Sprintf("model is unavailable: %d accounts were explicitly told by upstream that this model does not exist (11102)", un.Accounts),
+			"model_unavailable: this model is not served right now (evidence from upstream 11102 on multiple accounts); pick another model — the gateway re-probes automatically every 30 minutes")
+		st.status = http.StatusBadRequest
+		st.outcome = reqlog.OutcomeHTTPError
+		return
+	}
 
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
