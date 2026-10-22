@@ -131,7 +131,12 @@ func TestIsZeroOutputResponse(t *testing.T) {
 		{"有正文", choice(map[string]any{"content": "hi"}, "length"), false},
 		{"有思考", choice(map[string]any{"content": "", "reasoning_content": "想"}, "length"), false},
 		{"有工具调用", choice(map[string]any{"content": "", "tool_calls": []any{map[string]any{"id": "x"}}}, "length"), false},
-		{"空正文但 finish=stop", choice(map[string]any{"content": ""}, "stop"), false},
+		// Aggregate 的真实形态是 []map[string]any：只认 []any 会把纯工具调用误判零输出。
+		{"有工具调用（[]map 形态）", choice(map[string]any{"content": "", "tool_calls": []map[string]any{{"id": "x"}}}, "tool_calls"), false},
+		// M6 对齐：空正文 + stop 同样是「客户端拿到空回复」，非流式也要判零输出。
+		{"空正文但 finish=stop", choice(map[string]any{"content": ""}, "stop"), true},
+		// content_filter 例外：重试必然同样被拦，不判零输出。
+		{"空正文但被内容过滤", choice(map[string]any{"content": ""}, "content_filter"), false},
 		{"无 choices", map[string]any{}, false},
 	}
 	for _, c := range cases {
@@ -165,5 +170,59 @@ func TestZeroOutputGuardBufferCap(t *testing.T) {
 	}
 	if rec.Body.Len() == 0 {
 		t.Fatal("超限提交后客户端必须收到字节")
+	}
+}
+
+// TestZeroOutputGuardNoFinishReason 有帧但既无可见输出、也没有 finish_reason
+// （上游在收尾前断流）：与「空回复」同判据——客户端同样拿不到任何内容。
+func TestZeroOutputGuardNoFinishReason(t *testing.T) {
+	stream := `data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"choices":[{"index":0,"delta":{}}]}
+
+data: [DONE]
+
+`
+	rec := httptest.NewRecorder()
+	err := StreamHint(rec, strings.NewReader(stream), nil, WithZeroOutputGuard())
+	if !IsZeroOutputError(err) {
+		t.Fatalf("err=%v want errZeroOutput（无 finish_reason 的空流同样是零输出）", err)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("零字节写出被破坏：%q", rec.Body.String())
+	}
+}
+
+// TestZeroOutputGuardContentFilterNotZero content_filter 收尾的空内容**不**判零输出：
+// 重试必然同样被拦，回放让客户端看到真实结果。
+func TestZeroOutputGuardContentFilterNotZero(t *testing.T) {
+	stream := `data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}
+
+data: [DONE]
+
+`
+	rec := httptest.NewRecorder()
+	if err := StreamHint(rec, strings.NewReader(stream), nil, WithZeroOutputGuard()); err != nil {
+		t.Fatalf("content_filter 不应判零输出：%v", err)
+	}
+	if !strings.Contains(rec.Body.String(), "[DONE]") {
+		t.Fatalf("应正常收尾，实际 %q", rec.Body.String())
+	}
+}
+
+// TestZeroOutputGuardCommentOnlyStream 只有注释行（无 data 帧）+ [DONE]：
+// 视同空流（errEmptyStream），兜底 error 帧 + [DONE] 必须送达客户端（守卫不得吞掉）。
+func TestZeroOutputGuardCommentOnlyStream(t *testing.T) {
+	stream := ": keepalive\n\n: keepalive\n\ndata: [DONE]\n\n"
+	rec := httptest.NewRecorder()
+	err := StreamHint(rec, strings.NewReader(stream), nil, WithZeroOutputGuard())
+	if !IsEmptyStreamError(err) {
+		t.Fatalf("err=%v want errEmptyStream", err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "empty upstream stream") || !strings.Contains(body, "[DONE]") {
+		t.Fatalf("兜底帧必须送达，实际 %q", body)
 	}
 }

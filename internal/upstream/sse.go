@@ -43,7 +43,12 @@ const zeroGuardPendingCap = 1 << 20
 func IsZeroOutputError(err error) bool { return errors.Is(err, errZeroOutput) }
 
 // IsZeroOutputResponse 非流式口径的同一判据：choices[0].message 的 content /
-// reasoning_content 全空、无 tool_calls、且 finish_reason=length。
+// reasoning_content 全空且无 tool_calls。
+//
+// 与流式对齐（审查 M6）：不再要求 finish_reason=length。同一份上游形态，
+// stream:true 会换号重发、stream:false 却回 200 空壳——这种不一致本身就是 bug。
+// 唯一例外 finish_reason=content_filter（内容被拦截导致的空内容）：重试必然同样被拦，
+// 按原样返回让客户端看到「空且被过滤」的真实结果，而不是零输出 502。
 // 聚合路径用它决定「换号重发 vs 正常返回」。
 func IsZeroOutputResponse(resp map[string]any) bool {
 	chs, _ := resp["choices"].([]any)
@@ -54,7 +59,7 @@ func IsZeroOutputResponse(resp map[string]any) bool {
 	if first == nil {
 		return false
 	}
-	if fr, _ := first["finish_reason"].(string); fr != "length" {
+	if fr, _ := first["finish_reason"].(string); fr == "content_filter" {
 		return false
 	}
 	msg, _ := first["message"].(map[string]any)
@@ -67,8 +72,18 @@ func IsZeroOutputResponse(resp map[string]any) bool {
 	if s, _ := msg["reasoning_content"].(string); strings.TrimSpace(s) != "" {
 		return false
 	}
-	if tcs, _ := msg["tool_calls"].([]any); len(tcs) > 0 {
-		return false
+	// Aggregate 产出的是 []map[string]any（不是 []any），两种形态都要认：
+	// 只认 []any 会让「只有工具调用、没有正文」的响应被误判成零输出
+	// （M6 去掉 finish_reason 早退后立刻暴露——非流式工具调用被当成空回复重发）。
+	switch tcs := msg["tool_calls"].(type) {
+	case []any:
+		if len(tcs) > 0 {
+			return false
+		}
+	case []map[string]any:
+		if len(tcs) > 0 {
+			return false
+		}
 	}
 	return true
 }
@@ -898,7 +913,10 @@ readLoop:
 	// 但有收尾帧且 finish_reason=length（或上游干脆没给 finish_reason）→ 这是
 	// 「收下请求却零输出」。此刻网关还没写出任何字节，丢弃攒下的空帧并返回哨兵错误，
 	// 调用方换号重发即可，客户端完全无痕（响应头也还没提交）。
-	if o.zeroGuard && !committed && !zeroErrFrame && validFrames > 0 && (zeroFinish == "length" || zeroFinish == "") {
+	// 判据与 IsZeroOutputResponse 对齐：只要有帧、无 error、无任何可见输出，就是零输出
+	// （不再要求 finish_reason=length——EOF 截断/缺收尾帧同样是「客户端拿到空回复」）。
+	// content_filter 例外：重试必然同样被拦，按原样回放让客户端看到真实结果。
+	if o.zeroGuard && !committed && !zeroErrFrame && validFrames > 0 && zeroFinish != "content_filter" {
 		return errZeroOutput
 	}
 	// 空流（0 有效帧）：先写一帧 error（绕过 normalizeFrame 原样保留 error 字段），

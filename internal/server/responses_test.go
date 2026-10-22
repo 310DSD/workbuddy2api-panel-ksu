@@ -408,3 +408,75 @@ func TestResponsesStreamErrorKeepsHTTPStatus(t *testing.T) {
 		t.Errorf("code=%q want no_healthy_account", got.Error.Code)
 	}
 }
+
+// TestResponsesInterleavedReasoningDoesNotPanic H1 回归：reasoning 收尾（正文已开始）
+// 后又来 reasoning_content，不得 nil 解引用 panic；该段思考被丢弃，正文照常。
+func TestResponsesInterleavedReasoningDoesNotPanic(t *testing.T) {
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"想1\"}}]}\n\n" +
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"答\"}}]}\n\n" +
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"想2（交错）\"}}]}\n\n" +
+			"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+			"data: [DONE]\n\n", true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses",
+		strings.NewReader(`{"model":"glm-5.2","input":"hi","stream":true}`)))
+
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "答") {
+		t.Fatalf("正文丢失：%q", rec.Body.String())
+	}
+	evs := respEvents(t, rec.Body.String())
+	reasoningItems := 0
+	for _, e := range evs {
+		if e.Type == "response.output_item.added" {
+			if item, _ := e.Data["item"].(map[string]any); item["type"] == "reasoning" {
+				reasoningItems++
+			}
+		}
+	}
+	if reasoningItems != 1 {
+		t.Fatalf("reasoning item 数=%d want 1（交错思考不得重开 item）", reasoningItems)
+	}
+	if evs[len(evs)-1].Type != "response.completed" {
+		t.Fatalf("终态=%s", evs[len(evs)-1].Type)
+	}
+}
+
+// TestResponsesNoEventsAfterFailure M8 回归：终局 response.failed 之后不得再转发
+// 任何增量（Codex 严格校验事件序，终态后的事件会被判协议错）。
+func TestResponsesNoEventsAfterFailure(t *testing.T) {
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, "data: {\"error\":{\"message\":\"boom\",\"type\":\"upstream_error\"}}\n\n" +
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"迟到正文\"}}]}\n\n" +
+			"data: [DONE]\n\n", true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses",
+		strings.NewReader(`{"model":"glm-5.2","input":"hi","stream":true}`)))
+
+	evs := respEvents(t, rec.Body.String())
+	seenFailed := false
+	for _, e := range evs {
+		if e.Type == "response.failed" {
+			seenFailed = true
+			continue
+		}
+		if seenFailed {
+			t.Fatalf("response.failed 之后仍有事件：%s", e.Type)
+		}
+	}
+	if !seenFailed {
+		t.Fatalf("应产出 response.failed，实际事件=%v", eventTypes(evs))
+	}
+	if strings.Contains(rec.Body.String(), "迟到正文") {
+		t.Fatal("终态后的正文增量不得下发")
+	}
+}

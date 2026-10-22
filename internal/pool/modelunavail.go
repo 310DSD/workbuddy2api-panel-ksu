@@ -87,16 +87,21 @@ func (p *Pool) modelUnavailCountLocked(realm, model string, now time.Time) (int,
 	return n, reason, until
 }
 
-// ModelUnavailableFor 报告 (realm, model) 是否已判「整体不可用」，并处理探针窗口。
+// ModelUnavailableFor 报告 (realm, model) 是否已判「整体不可用」。
 //
-// 返回值第二项 blocked=true 表示本次请求应当**在打上游之前**就拒掉（400
-// model_unavailable）；blocked=false 且 info.Model 非空表示「已判定，但本次是探针
-// 请求，放行一次去验证上游是否恢复」。
+// 返回 (info, blocked, probe)：
+//   - blocked=true  → 本次请求应当在**打上游之前**就拒掉（400 model_unavailable）；
+//   - probe=true    → 已判定，但本次是放行的探针请求（验证上游是否恢复）；
+//   - 两者皆 false  → 证据不足，按正常请求处理。
+//
+// probe 名额**不在这里记账**：调用方必须在真正要发上游请求之前调用
+// MarkModelUnavailableProbe。否则「选号失败 / 参数错误 / 客户端断连」这类根本没触达
+// 上游的请求会白吃掉探针名额，把恢复检测拖慢一整个窗口（审查 M7）。
 //
 // realm 传空 = 跨域合计（调用方未指定域时，任一域的两个号也足以证明该模型整体下架）。
-func (p *Pool) ModelUnavailableFor(realm, model string) (ModelUnavailable, bool) {
+func (p *Pool) ModelUnavailableFor(realm, model string) (ModelUnavailable, bool, bool) {
 	if model == "" {
-		return ModelUnavailable{}, false
+		return ModelUnavailable{}, false, false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -105,15 +110,28 @@ func (p *Pool) ModelUnavailableFor(realm, model string) (ModelUnavailable, bool)
 	if n < modelUnavailMinAccounts {
 		// 证据不足：顺手清掉探针记录（模型已恢复，下次再判要从「立即放行」重新开始）。
 		delete(p.unavailProbe, unavailKey(realm, model))
-		return ModelUnavailable{}, false
+		return ModelUnavailable{}, false, false
 	}
 	info := ModelUnavailable{Realm: realm, Model: model, Accounts: n, Reason: reason, Until: until}
-	key := unavailKey(realm, model)
-	if last, ok := p.unavailProbe[key]; ok && now.Sub(last) < modelUnavailProbeGap {
-		return info, true // 探针窗口内：拒（不打上游）
+	if last, ok := p.unavailProbe[unavailKey(realm, model)]; ok && now.Sub(last) < modelUnavailProbeGap {
+		return info, true, false // 探针窗口内：拒（不打上游）
 	}
-	p.unavailProbe[key] = now // 放行本次探针
-	return info, false
+	return info, false, true // 放行一次探针（调用方在真正打上游前记账）
+}
+
+// MarkModelUnavailableProbe 记账一次「探针已真正发出」：只有调用方确定要发上游请求时
+// 才调用（见 ModelUnavailableFor 的说明）。并发下两个请求可能都拿到 probe=true，
+// 这里只记最后一次时刻，最坏是多放一个探针请求——可接受，远好于把名额记在没发请求上。
+func (p *Pool) MarkModelUnavailableProbe(realm, model string) {
+	if model == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.unavailProbe == nil {
+		p.unavailProbe = map[string]time.Time{}
+	}
+	p.unavailProbe[unavailKey(realm, model)] = time.Now()
 }
 
 // UnavailableModels 返回当前被判「整体不可用」的全部模型（按域 + 模型名稳定排序）。

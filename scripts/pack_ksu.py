@@ -62,7 +62,9 @@ def build(src: str, out: str) -> None:
             arc = f if rel == "." else rel + "/" + f
             entries.append((arc, os.path.join(root, f)))
 
-    os.makedirs(os.path.dirname(out), exist_ok=True)
+    parent = os.path.dirname(out)
+    if parent:  # 传纯文件名时 dirname 是空串，makedirs('') 会抛异常
+        os.makedirs(parent, exist_ok=True)
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         for arc, path in entries:
             zi = zipfile.ZipInfo(arc, date_time=FIXED_DATE)

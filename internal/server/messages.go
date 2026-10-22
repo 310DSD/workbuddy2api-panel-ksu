@@ -375,13 +375,16 @@ func anthropicToolChoiceToChat(v any) any {
 
 // anthBlock 一个正在流式输出的 Anthropic content block。
 type anthBlock struct {
-	idx    int
-	typ    string // text | thinking | tool_use
-	id     string
-	name   string
-	buf    strings.Builder // text / thinking 正文 或 tool_use 的参数 JSON 增量
-	opened bool
-	closed bool
+	idx  int
+	typ  string // text | thinking | tool_use
+	id   string
+	name string
+	buf  strings.Builder // text / thinking 正文 或 tool_use 的参数 JSON 增量
+	// emitted 已通过 input_json_delta 发出的字节数：name 晚到时先攒后补，
+	// 避免同一段参数发两遍（JSON 拼接会坏）。
+	emitted int
+	opened  bool
+	closed  bool
 }
 
 // anthState 单次 Messages 请求的回程状态。
@@ -465,6 +468,9 @@ func (w *anthropicWriter) drainFrames() {
 
 // handleChunk 翻译单个 chat chunk 成 Anthropic 事件。
 func (w *anthropicWriter) handleChunk(payload string) {
+	if w.x.failed || w.x.done {
+		return // 终态事件已发：后续帧一律丢弃（Anthropic 客户端严格校验事件序）
+	}
 	var obj map[string]any
 	if json.Unmarshal([]byte(payload), &obj) != nil {
 		return
@@ -488,9 +494,14 @@ func (w *anthropicWriter) handleChunk(payload string) {
 	if delta != nil {
 		w.ensureStarted()
 		if s, ok := delta["reasoning_content"].(string); ok && s != "" {
-			w.openThinking()
-			w.emitDelta(w.x.thinking, map[string]any{"type": "thinking_delta", "thinking": s})
-			w.x.thinking.buf.WriteString(s)
+			// Anthropic 的 content block 必须顺序开合：正文/工具块已经打开后再来思考，
+			// 无法在不违反块序的前提下插进去（也不能回头重开 text 块）。丢弃这段思考
+			// ——与 responses 侧同一取舍：思考仅展示，不影响正文/工具调用。
+			if w.x.text == nil && len(w.x.toolOrder) == 0 {
+				w.openThinking()
+				w.emitDelta(w.x.thinking, map[string]any{"type": "thinking_delta", "thinking": s})
+				w.x.thinking.buf.WriteString(s)
+			}
 		}
 		if s, ok := delta["content"].(string); ok && s != "" {
 			w.closeThinking()
@@ -544,12 +555,29 @@ func (w *anthropicWriter) handleToolDeltas(tcs []any) {
 					"type": "tool_use", "id": blk.id, "name": blk.name, "input": map[string]any{},
 				},
 			})
+			w.flushToolArgs(blk) // name 晚到时，把先攒下的参数一次性补发
 		}
-		if args, ok := fn["arguments"].(string); ok && args != "" && blk.opened {
-			w.emitDelta(blk, map[string]any{"type": "input_json_delta", "partial_json": args})
+		if args, ok := fn["arguments"].(string); ok && args != "" {
+			// 参数无条件累积：分片顺序不保证 name 先到，早到的参数不能丢。
 			blk.buf.WriteString(args)
+			if blk.opened {
+				w.flushToolArgs(blk)
+			}
 		}
 	}
+}
+
+// flushToolArgs 把「尚未发出」的参数增量补发成 input_json_delta。
+func (w *anthropicWriter) flushToolArgs(blk *anthBlock) {
+	if blk == nil || !blk.opened || blk.closed {
+		return
+	}
+	all := blk.buf.String()
+	if blk.emitted >= len(all) {
+		return
+	}
+	w.emitDelta(blk, map[string]any{"type": "input_json_delta", "partial_json": all[blk.emitted:]})
+	blk.emitted = len(all)
 }
 
 func (w *anthropicWriter) nextIdx() int {

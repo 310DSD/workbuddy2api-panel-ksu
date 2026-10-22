@@ -372,17 +372,19 @@ func stringifyArgs(v any) string {
 
 // respItem 一个正在生成（或已收尾）的 Responses output item。
 type respItem struct {
-	idx       int
-	id        string
-	typ       string // reasoning | message | function_call
-	status    string // in_progress | completed
-	callID    string
-	name      string
-	text      strings.Builder // reasoning summary / message 正文
-	args      strings.Builder // function_call 参数
-	added     bool            // output_item.added 已发
-	partAdded bool            // content_part / summary_part 已发
-	closed    bool            // output_item.done 已发
+	idx    int
+	id     string
+	typ    string // reasoning | message | function_call
+	status string // in_progress | completed
+	callID string
+	name   string
+	text   strings.Builder // reasoning summary / message 正文
+	args   strings.Builder // function_call 参数
+	// emitted 已通过 function_call_arguments.delta 发出的字节数（name 晚到先攒后补）。
+	emitted   int
+	added     bool // output_item.added 已发
+	partAdded bool // content_part / summary_part 已发
+	closed    bool // output_item.done 已发
 }
 
 // respState 单次 Responses 请求的出站状态机。
@@ -480,6 +482,9 @@ func (w *responsesWriter) drainFrames() {
 
 // handleChunk 翻译单个 chat chunk。
 func (w *responsesWriter) handleChunk(payload string) {
+	if w.x.failed || w.x.completed {
+		return // 终态事件已发：后续帧一律丢弃（否则违反事件序契约）
+	}
 	var obj map[string]any
 	if json.Unmarshal([]byte(payload), &obj) != nil {
 		return
@@ -504,14 +509,19 @@ func (w *responsesWriter) handleChunk(payload string) {
 	if delta != nil {
 		w.ensureStarted()
 		if s, ok := delta["reasoning_content"].(string); ok && s != "" {
-			w.openReasoning()
-			w.emit("response.reasoning_summary_text.delta", map[string]any{
-				"item_id":       w.x.reasoning.id,
-				"output_index":  w.x.reasoning.idx,
-				"summary_index": 0,
-				"delta":         s,
-			})
-			w.x.reasoning.text.WriteString(s)
+			// openReasoning 返回 nil = 本 response 的 reasoning item 已收尾（思考→正文→
+			// 又思考的交错形态）。不能再开第二个（会撞 item id、破坏已有 output 顺序），
+			// 也不能解引用 nil（曾直接 panic 掐断连接）——丢弃这段思考：它只用于展示，
+			// 不影响回合正文与工具调用。
+			if it := w.openReasoning(); it != nil {
+				w.emit("response.reasoning_summary_text.delta", map[string]any{
+					"item_id":       it.id,
+					"output_index":  it.idx,
+					"summary_index": 0,
+					"delta":         s,
+				})
+				it.text.WriteString(s)
+			}
 		}
 		if s, ok := delta["content"].(string); ok && s != "" {
 			w.closeReasoning()
@@ -579,18 +589,40 @@ func (w *responsesWriter) handleToolDeltas(tcs []any) {
 					"arguments": "",
 				},
 			})
+			w.flushRespToolArgs(it) // name 晚到时补发先攒下的参数
 		}
+		// 前置约束：upstream.stripToolCallNames 把「每 index 的首片」定义为 name 权威片，
+		// 后续分片里的 name 键会被删除。因此 name 只可能来自首片；本循环仍对「参数先于
+		// name」做防御性累积（历史畸形流/未来换实现时不至于丢参数），但没有 name 的调用
+		// 无法开 item——那是上游违规形态，不臆造工具名。
 		if fn, ok := tc["function"].(map[string]any); ok {
-			if s, ok := fn["arguments"].(string); ok && s != "" && it.added {
-				w.emit("response.function_call_arguments.delta", map[string]any{
-					"item_id":      it.id,
-					"output_index": it.idx,
-					"delta":        s,
-				})
+			if s, ok := fn["arguments"].(string); ok && s != "" {
+				// 参数无条件累积；只有 item 已打开才即时下发，否则等打开时一次性补发
+				// （见下方 flushRespToolArgs）。
 				it.args.WriteString(s)
+				if it.added {
+					w.flushRespToolArgs(it)
+				}
 			}
 		}
 	}
+}
+
+// flushRespToolArgs 把「尚未发出」的参数增量补发成 function_call_arguments.delta。
+func (w *responsesWriter) flushRespToolArgs(it *respItem) {
+	if it == nil || !it.added || it.closed {
+		return
+	}
+	all := it.args.String()
+	if it.emitted >= len(all) {
+		return
+	}
+	w.emit("response.function_call_arguments.delta", map[string]any{
+		"item_id":      it.id,
+		"output_index": it.idx,
+		"delta":        all[it.emitted:],
+	})
+	it.emitted = len(all)
 }
 
 func (w *responsesWriter) nextIdx() int {
@@ -610,9 +642,12 @@ func (w *responsesWriter) ensureStarted() {
 	w.emit("response.in_progress", map[string]any{"response": resp})
 }
 
-func (w *responsesWriter) openReasoning() {
-	if w.x.reasoning != nil || w.reasoningDone() {
-		return
+func (w *responsesWriter) openReasoning() *respItem {
+	if w.x.reasoning != nil {
+		return w.x.reasoning
+	}
+	if w.reasoningDone() {
+		return nil // 已有一个收尾的 reasoning item：见调用方注释（丢弃后续思考）
 	}
 	w.ensureStarted()
 	it := &respItem{typ: "reasoning", status: "in_progress", id: "rs_" + w.x.id, idx: w.nextIdx(), added: true}
@@ -628,6 +663,7 @@ func (w *responsesWriter) openReasoning() {
 		"part":          map[string]any{"type": "summary_text"},
 	})
 	it.partAdded = true
+	return it
 }
 
 // reasoningDone 标记已收尾的 reasoning（同一响应只出一个 reasoning item）。

@@ -603,13 +603,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 上游**明确**回 11102 → 在打上游之前就拒，省掉「每个号都白撞一次」的代价。
 	// 每 modelUnavailProbeGap 放行一个探针请求验证上游是否恢复（成功会自动清账）。
 	// 用 400 而非 503：换号重试必然同样失败，该做的是换模型。
-	if un, blocked := h.cfg.Pool.ModelUnavailableFor(realm, bareModel); blocked {
+	// 探针名额在**真正要发上游请求**时才记账（见下方 markUnavailProbe），
+	// 避免选号失败/断连等没触达上游的请求白吃名额（审查 M7）。
+	unavailInfo, unavailBlocked, unavailProbe := h.cfg.Pool.ModelUnavailableFor(realm, bareModel)
+	if unavailBlocked {
 		writeOpenAIErrorHint(w, http.StatusBadRequest, "model_unavailable",
-			fmt.Sprintf("model is unavailable: %d accounts were explicitly told by upstream that this model does not exist (11102)", un.Accounts),
+			fmt.Sprintf("model is unavailable: %d accounts were explicitly told by upstream that this model does not exist (11102)", unavailInfo.Accounts),
 			"model_unavailable: this model is not served right now (evidence from upstream 11102 on multiple accounts); pick another model — the gateway re-probes automatically every 30 minutes")
 		st.status = http.StatusBadRequest
 		st.outcome = reqlog.OutcomeHTTPError
 		return
+	}
+	// markUnavailProbe 本请求若被判定为探针，就在发上游前记账一次（只记一次）。
+	markUnavailProbe := func() {
+		if !unavailProbe {
+			return
+		}
+		h.cfg.Pool.MarkModelUnavailableProbe(realm, bareModel)
+		unavailProbe = false
 	}
 
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
@@ -869,6 +880,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
 		attemptStarted := time.Now()
+		markUnavailProbe() // 只有真正要打上游了，才消耗探针名额（M7）
 		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, body, clientIP, chatMeta)
 		// 分类信封一次成型：upstream 已在错误路径返回 *upstream.Error（Kind +
 		// Retry-After 头解析）。传输层错误（非 *Error）走抖动换号分支；防御分支
@@ -1177,8 +1189,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if upstream.IsZeroOutputResponse(resp) {
 			zeroOutputs++
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
-			st.outcome = reqlog.OutcomeStreamError
-			log.Printf("WARN: [server] non-stream acct=%s model=%s: zero output (finish=length, empty content/reasoning/tools) → rotate without penalty",
+			st.outcome = reqlog.OutcomeHTTPError // 非流式没有「流」：最终是 502 HTTP 错误
+			log.Printf("WARN: [server] non-stream acct=%s model=%s: zero output (empty content/reasoning/tools) → rotate without penalty",
 				logfmt.Label(acct.UID, acct.Nickname), bareModel)
 			fail(acct.UID)
 			if !rotateBackoff(i, r.Context()) {

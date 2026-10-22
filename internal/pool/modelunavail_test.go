@@ -23,7 +23,7 @@ func unavailPool(uids ...string) *Pool {
 func TestModelUnavailableNeedsTwoAccounts(t *testing.T) {
 	p := unavailPool("a", "b", "c")
 	p.BlockModelBackoff("a", "ghost-model", "11102 model not available")
-	if _, blocked := p.ModelUnavailableFor("cn", "ghost-model"); blocked {
+	if _, blocked, _ := p.ModelUnavailableFor("cn", "ghost-model"); blocked {
 		t.Fatal("单号命中不得提升为整体不可用")
 	}
 	if got := p.UnavailableModels(); len(got) != 0 {
@@ -47,13 +47,18 @@ func TestModelUnavailableProbeWindow(t *testing.T) {
 	p.BlockModelBackoff("a", "ghost", "11102 model not available")
 	p.BlockModelBackoff("b", "ghost", "11102 model not available")
 
-	// 第一次：放行探针（blocked=false，但仍返回 info）。
-	if _, blocked := p.ModelUnavailableFor("cn", "ghost"); blocked {
+	// 第一次：放行探针（blocked=false，但仍返回 info）。名额在真正打上游前才记账（M7）。
+	info, blocked, probe := p.ModelUnavailableFor("cn", "ghost")
+	if blocked || !probe {
 		t.Fatal("判定后的首个请求应放行探针（否则上游恢复了永远学不到）")
 	}
-	// 探针之后立刻再请求：拦。
-	info, blocked := p.ModelUnavailableFor("cn", "ghost")
-	if !blocked {
+	// 未记账前重复调用仍是探针（说明没触达上游的请求不吃名额）。
+	if _, blocked2, probe2 := p.ModelUnavailableFor("cn", "ghost"); blocked2 || !probe2 {
+		t.Fatal("未真正发上游请求时不应消耗探针名额（M7）")
+	}
+	p.MarkModelUnavailableProbe("cn", "ghost")
+	// 记账后立刻再请求：拦。
+	if _, blocked3, _ := p.ModelUnavailableFor("cn", "ghost"); !blocked3 {
 		t.Fatal("探针后窗口内应拦截（不再每次请求都打上游）")
 	}
 	if info.Accounts != 2 {
@@ -63,7 +68,7 @@ func TestModelUnavailableProbeWindow(t *testing.T) {
 	p.mu.Lock()
 	p.unavailProbe[unavailKey("cn", "ghost")] = time.Now().Add(-modelUnavailProbeGap - time.Second)
 	p.mu.Unlock()
-	if _, blocked := p.ModelUnavailableFor("cn", "ghost"); blocked {
+	if _, blocked, _ := p.ModelUnavailableFor("cn", "ghost"); blocked {
 		t.Fatal("探针窗口过期后应再放行一次")
 	}
 }
@@ -74,7 +79,7 @@ func TestModelUnavailableIgnores11158(t *testing.T) {
 	p := unavailPool("a", "b")
 	p.BlockModelBackoff("a", "pro-model", "11158 account type not allowed")
 	p.BlockModelBackoff("b", "pro-model", "11158 account type not allowed")
-	if _, blocked := p.ModelUnavailableFor("cn", "pro-model"); blocked {
+	if _, blocked, _ := p.ModelUnavailableFor("cn", "pro-model"); blocked {
 		t.Fatal("11158 不得触发整体不可用提升")
 	}
 	if got := p.UnavailableModels(); len(got) != 0 {
@@ -95,7 +100,7 @@ func TestModelUnavailableAutoRecovers(t *testing.T) {
 	if got := p.UnavailableModels(); len(got) != 0 {
 		t.Fatalf("清掉一个账号的台账后应恢复，got %+v", got)
 	}
-	if _, blocked := p.ModelUnavailableFor("cn", "ghost"); blocked {
+	if _, blocked, _ := p.ModelUnavailableFor("cn", "ghost"); blocked {
 		t.Fatal("证据不足时不得拦截")
 	}
 }
@@ -125,14 +130,16 @@ func TestModelUnavailableRealmScoped(t *testing.T) {
 	p.BlockModelBackoff("cn1", "ghost", "11102 model not available")
 	p.BlockModelBackoff("g1", "ghost", "11102 model not available")
 
-	if _, blocked := p.ModelUnavailableFor("cn", "ghost"); blocked {
+	if _, blocked, _ := p.ModelUnavailableFor("cn", "ghost"); blocked {
 		t.Fatal("cn 域只有 1 个号命中，不应拦截该域的请求")
 	}
-	if _, blocked := p.ModelUnavailableFor("", "ghost"); !blocked {
-		// 跨域合计 2 个号：首个请求是探针（放行），第二次才拦——这里取第二次的结果。
-		if _, blocked2 := p.ModelUnavailableFor("", "ghost"); !blocked2 {
-			t.Fatal("跨域合计 >=2 个账号命中时应拦截（第二次请求）")
-		}
+	// 跨域合计 2 个号：首个请求是探针（放行），记账后第二次才拦。
+	if _, blocked, probe := p.ModelUnavailableFor("", "ghost"); blocked || !probe {
+		t.Fatal("跨域合计 >=2 个账号命中时应放行探针")
+	}
+	p.MarkModelUnavailableProbe("", "ghost")
+	if _, blocked, _ := p.ModelUnavailableFor("", "ghost"); !blocked {
+		t.Fatal("跨域合计 >=2 个账号命中时应拦截（第二次请求）")
 	}
 }
 

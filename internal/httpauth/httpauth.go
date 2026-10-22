@@ -42,8 +42,9 @@ func VerifyBearer(r *http.Request, key string) bool {
 //	x-api-key: <key>              （Anthropic 口径，Claude Code 用这个）
 //
 // key 为空表示"未启用鉴权"，恒返回 true（与 VerifyBearer 同语义）。
-// 两种形态都走 SHA-256 摘要 + 常量时间比较，且**两条都算一遍**再取或：
-// 早退会让「只带 x-api-key」的请求比「带错 Bearer」的请求更快返回，泄露头形态。
+// 两种形态都走 SHA-256 摘要 + 常量时间比较；两条路径都执行再取或（不做短路），
+// 避免「带哪种头」在耗时上形成可观测差异。注意：这只抹平比较阶段，网络与
+// 上层处理耗时仍占绝对多数，不宣称端到端恒定时间。
 func VerifyAPIKey(r *http.Request, key string) bool {
 	if key == "" {
 		return true

@@ -25,9 +25,10 @@ func TestChatRejectsModelUnavailableBeforeUpstream(t *testing.T) {
 	p.BlockModelBackoff("u1", "ghost", upstream.ModelBlockReason)
 	p.BlockModelBackoff("u2", "ghost", upstream.ModelBlockReason)
 	// 消耗掉首次探针窗口：先让 pool 放行一次探针，再发真请求 → 本次应被拦。
-	if _, blocked := p.ModelUnavailableFor("cn", "ghost"); blocked {
+	if _, blocked, probe := p.ModelUnavailableFor("cn", "ghost"); blocked || !probe {
 		t.Fatal("前置失效：判定后首个调用应是探针（放行）")
 	}
+	p.MarkModelUnavailableProbe("cn", "ghost")
 
 	var calls int64
 	up := newFakeUpstream(t, func(string) (int, string, bool) {

@@ -152,6 +152,13 @@ func (p *Panel) compensationClaimAll(w http.ResponseWriter, r *http.Request) {
 	results := make([]result, 0, len(statuses))
 	claimed, skipped, failed := 0, 0, 0
 	for _, st := range statuses {
+		if st.Disabled {
+			// 禁用号（授权终态/人工停用）不参与批量领取：打上游必然 401，只会把
+			// failed 计数刷成噪音；它们的补偿状态在列表接口里仍如实展示（人工处置）。
+			skipped++
+			results = append(results, result{UID: st.UID, Reason: "disabled"})
+			continue
+		}
 		row := p.compensationRow(p.cfg.Pool.AuthByUID(st.UID), st)
 		switch {
 		case row.Error != "":
