@@ -389,7 +389,11 @@ function renderAccounts(list) {
       const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
         : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
-    } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
+    }
+    // 保留积分停牌：余额见底，账号整体不再接单（已确认免费的模型除外）。
+    // 冷却优先展示（冷却才是「正在发生的事」），停牌是持续状态放其后。
+    else if (s.reserved) { cls = 'off'; tag = '<span class="tag warn">保留积分</span>'; }
+    else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
     const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
@@ -982,6 +986,7 @@ const CFG_MAP = {
   degrade_cooldown_max: ['pool', 'degrade_cooldown_max'],
   cost_explore_interval: ['pool', 'cost_explore_interval'],
   credit_floor: ['pool', 'credit_floor'],
+  reserve_credits: ['pool', 'reserve_credits'],
   prefer_expiring: ['pool', 'prefer_expiring'], expiring_soon: ['pool', 'expiring_soon'],
   soft_rate: ['cooldown', 'soft_rate'], soft_rate_max: ['cooldown', 'soft_rate_max'],
   breaker_cooldown: ['pool', 'breaker_cooldown'], breaker_cooldown_max: ['pool', 'breaker_cooldown_max'],

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -205,6 +206,13 @@ type Config struct {
 		// tier 0（免费）/ tier 1（无观测）不受限；签到回血越过 floor 自动恢复。
 		// 默认 0 = 关闭；负值钳 0。
 		CreditFloor int64 `json:"credit_floor"`
+		// ReserveCredits 保留积分（账号级保命线）：余额**已知**且 <= 该值时，账号整体
+		// 停止接单（不再参与选号），仍留在池中照常跑签到/旅行等保号任务，充值回血
+		// 后自动恢复。与 credit_floor 的分工：credit_floor 只拦「已证收费」的模型
+		// （tier 0/1 放行，给新模型留学习机会），reserve_credits 对任何模型都停牌，
+		// 只放过「已确认免费」的模型——堵住「无观测的高价新模型」把见底号一次打穿
+		// 到 0 并触发上游提醒短信。默认 0 = 关闭（零回归）；负值钳 0。通常应 <= credit_floor。
+		ReserveCredits int64 `json:"reserve_credits"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -526,6 +534,17 @@ func (c *Config) normalize() error {
 	// 积分保底：负值钳 0（= 关闭）。0 是合法默认（关闭），无需空值回落。
 	if c.Pool.CreditFloor < 0 {
 		c.Pool.CreditFloor = 0
+	}
+	// 保留积分：负值钳 0（= 关闭）。0 是合法默认（关闭），无需空值回落。
+	if c.Pool.ReserveCredits < 0 {
+		c.Pool.ReserveCredits = 0
+	}
+	if c.Pool.ReserveCredits > 0 && c.Pool.CreditFloor > 0 && c.Pool.ReserveCredits > c.Pool.CreditFloor {
+		// 语义提醒（不拦）：reserve 通常应 <= floor——floor 管「收费模型精细化」，
+		// reserve 管「账号级保命线」。反向配置不会出错（reserve 更严），但会让
+		// floor 的模型分级完全失去意义，多半是写错了。
+		log.Printf("WARN: [config] pool.reserve_credits(%d) > pool.credit_floor(%d)：保留积分比积分保底更严，积分保底的模型分级将不起作用",
+			c.Pool.ReserveCredits, c.Pool.CreditFloor)
 	}
 	if c.Pool.BreakerThreshold <= 0 {
 		c.Pool.BreakerThreshold = 3

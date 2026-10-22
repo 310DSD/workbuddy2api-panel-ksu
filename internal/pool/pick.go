@@ -69,6 +69,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		if floorBlocked(e) {
 			continue // 积分保底：触底号不接实测收费模型（tier 0/1 不受限）
 		}
+		if p.reserveBlockedForModel(e, reqModel, now) {
+			continue // 保留积分：见底号停止接单（已确认免费的模型除外）
+		}
 		if p.inFlightFull(e) {
 			continue // 在途占满：跳过（max=0 不限时不触发）
 		}
@@ -282,6 +285,40 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 	return v > 0
 }
 
+// reserveBlockedForModel 报告账号是否因「保留积分」停牌（账号级保命线，不再接单）。
+// 调用方须持锁。
+//
+// 与 floorBlockedForRealmModel 的分工：那一档按「模型是否收费」精细化拦截（tier 0/1
+// 放行，只有已证收费才拦）；本档是钝刀——余额**已知**且 <= reserveCredits 时对任何
+// 模型停牌，唯一豁免是「已确认免费」的模型。原因：积分保底对「无观测且目录未覆盖」
+// 的模型必须放行（否则号会永久失联），而余额见底的号恰恰经不起一次未知高价模型的
+// 扣费（上游余额归零会发提醒短信）。阈值 0 = 关闭；creditsTotal == 0（从未查到余额，
+// 与 Status.CreditsTotal「0 = 未知」同口径）不拦，否则全新装机会看起来整池不可用。
+func (p *Pool) reserveBlockedForModel(e *entry, model string, now time.Time) bool {
+	if p.reserveCredits <= 0 || e.creditsTotal <= 0 || e.credits > p.reserveCredits {
+		return false
+	}
+	return !p.modelKnownFree(e, model, now)
+}
+
+// modelKnownFree 报告 (账号, 模型) 是否**已确认免费**：本地实测台账 cost <= 0（tier 0），
+// 或上游目录倍率为 0。未知（无观测 / 目录未覆盖 / 倍率非数值）一律按收费处理——停牌
+// 豁免宁可不发，误拦的代价只是一个号暂时不接单，误放的代价是余额被打到 0。
+// model 为空（无模型上下文）恒 false。调用方须持锁（读 e.modelCost / p.modelRateOf）。
+func (p *Pool) modelKnownFree(e *entry, model string, now time.Time) bool {
+	if model == "" {
+		return false
+	}
+	if mc, ok := e.modelCostOf(model, now); ok {
+		return mc.CostPer1k <= 0
+	}
+	if p.modelRateOf == nil {
+		return false
+	}
+	v, err := strconv.ParseFloat(p.modelRateOf(e.a.Realm(), model), 64)
+	return err == nil && v == 0
+}
+
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。
 // 分级：disabled 永不参与；CoolHard（余额耗尽，等签到的号）同样排除——调了必 402，浪费轮换并产生噪音日志；
 // CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
@@ -308,6 +345,9 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		}
 		if p.floorBlockedForRealmModel(e, model, realm, now) {
 			continue // 积分保底：触底号不接收费模型（兜底路径同判据）
+		}
+		if p.reserveBlockedForModel(e, model, now) {
+			continue // 保留积分：兜底路径同样不得把见底号「捞回来」
 		}
 		if p.inFlightFull(e) {
 			continue

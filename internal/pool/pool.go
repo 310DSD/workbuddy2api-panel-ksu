@@ -49,6 +49,14 @@ type Pool struct {
 	// 收费与否的判据见 floorBlockedForModel：本地实测台账优先，缺失时用上游目录
 	// 倍率（modelRateOf 注入）兜底，避免「无观测的高价新模型」绕过保底。
 	creditFloor int64
+	// reserveCredits 保留积分阈值（SetReserveCredits 注入；0 = 关闭，缺省即现状）。
+	// 与 creditFloor 的分工：creditFloor 按「模型是否收费」精细化拦截（tier 0/1 放行），
+	// reserveCredits 是**账号级保命线**——余额已知且 <= 阈值时，无论请求什么模型
+	// （实测/目录判定的免费档除外，见 reserveBlockedForModel）一律停止接单，堵住
+	// 「无观测模型」把余额打到 0 触发上游提醒短信的漏洞。账号仍在池中、照常跑定时
+	// 任务（签到/猫猫旅行本身赚积分），充值回血后自动恢复。两者可同时配置，通常
+	// reserve 应 <= floor。
+	reserveCredits int64
 	// modelRateOf 按 (realm, 模型) 查上游目录积分倍率（"0.79" / "" = 未知）。
 	// 由 main 用 upstream.Client.ModelRate 注入——pool 不依赖 upstream 包（避免
 	// 循环依赖与分层破坏），nil 时倍率兜底不生效（退化为仅本地台账判定）。
@@ -224,6 +232,25 @@ func (p *Pool) SetCreditFloor(n int64) {
 	defer p.mu.Unlock()
 	if n >= 0 {
 		p.creditFloor = n
+	}
+}
+
+// ReserveCredits 透出生效的保留积分阈值（/status 用）。0 = 关闭。
+func (p *Pool) ReserveCredits() int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.reserveCredits
+}
+
+// SetReserveCredits 注入保留积分阈值（main 从 config 解析后调用；0 = 关闭）。
+// 与 creditFloor 同风格：0 是合法值（关闭），负值非法保留现值；不落 state.json
+// ——config 是事实源，重启由 main 重新注入。
+// 语义见 Pool.reserveCredits 字段注释。
+func (p *Pool) SetReserveCredits(n int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n >= 0 {
+		p.reserveCredits = n
 	}
 }
 

@@ -396,6 +396,13 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 			logfmt.Label(e.a.UID, e.a.Nickname), model, e.credits, p.creditFloor)
 		return nil
 	}
+	// 保留积分（粘性路径）：与 pick 同判据——余额见底即停牌，返回 nil 让 handler
+	// 解绑粘性、走普通轮换换号（免费档模型豁免，见 reserveBlockedForModel）。
+	if p.reserveBlockedForModel(e, model, now) {
+		log.Printf("WARN: [pool] reserve credits: sticky acct=%s model=%s credits=%d <= reserve=%d, unbind (account parked)",
+			logfmt.Label(e.a.UID, e.a.Nickname), model, e.credits, p.reserveCredits)
+		return nil
+	}
 	if p.inFlightFull(e) {
 		return nil
 	}
@@ -558,20 +565,23 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Reason:                   e.reason,
 		Disabled:                 e.disabled,
 		Paused:                   e.paused,
-		SuccessCount:             e.successCount,
-		ErrTotal:                 e.errTotal,
-		CheckinDone:              e.lastCheckinDay == now.Format("2006-01-02"),
-		TokenUsage:               e.tokenUsage,
-		LastSuccessTime:          e.lastSuccess,
-		LastErrTime:              e.lastErr,
-		Until:                    e.until,
-		SoftStreak:               e.softStreak,
-		ModelCosts:               p.modelCostsStatusLocked(e, now),
-		ConsecutiveFails:         e.consecutiveFails,
-		DegradeUntil:             e.degradeUntil,
-		InFlight:                 int(e.inFlight.Load()),
-		BreakerFails:             e.fails,
-		BreakerUntil:             e.breakerUntil,
+		// 保留积分标记：只按余额口径（不看具体模型），供面板解释「为什么这个号不接单」。
+		// 免费档豁免发生在选号时，故此标记是「整体状态」，可能与个别免费请求仍能命中并存。
+		Reserved:         p.reserveCredits > 0 && e.creditsTotal > 0 && e.credits <= p.reserveCredits,
+		SuccessCount:     e.successCount,
+		ErrTotal:         e.errTotal,
+		CheckinDone:      e.lastCheckinDay == now.Format("2006-01-02"),
+		TokenUsage:       e.tokenUsage,
+		LastSuccessTime:  e.lastSuccess,
+		LastErrTime:      e.lastErr,
+		Until:            e.until,
+		SoftStreak:       e.softStreak,
+		ModelCosts:       p.modelCostsStatusLocked(e, now),
+		ConsecutiveFails: e.consecutiveFails,
+		DegradeUntil:     e.degradeUntil,
+		InFlight:         int(e.inFlight.Load()),
+		BreakerFails:     e.fails,
+		BreakerUntil:     e.breakerUntil,
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。

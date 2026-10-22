@@ -89,7 +89,11 @@ type Status struct {
 	// 签到 / 活跃上报 / 保活 / 余额刷新四类保号任务。与 disabled 正交——disabled 是
 	// 「授权/session 终态，需人工 revive」，paused 是「运维临时让位」（多号轮换场景），
 	// 账号本身健康，只是暂不接流量。
-	Paused          bool      `json:"paused,omitempty"`
+	Paused bool `json:"paused,omitempty"`
+	// Reserved 保留积分停牌：余额**已知**且 <= pool.reserve_credits 时，账号整体
+	// 不再接单（已确认免费的模型除外）。与 paused 正交——paused 是人工让位，
+	// Reserved 是余额保命，充值回血后自动消失。面板据此在账号行打「保留积分」标记。
+	Reserved        bool      `json:"reserved,omitempty"`
 	SuccessCount    int64     `json:"success_count,omitempty"`
 	ErrTotal        int64     `json:"err_total,omitempty"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
