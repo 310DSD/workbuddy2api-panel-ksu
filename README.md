@@ -1,4 +1,4 @@
-> **本仓库是 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的 GitHub Fork**（官方 fork 关系），并在上游 **v1.10.0** 上增加 Android KernelSU 模块移植（`v1.10.0-ksu`）。构建与增量见 [EXPORT.md](EXPORT.md)。
+> **本仓库是 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的 GitHub Fork**（官方 fork 关系），并在上游 **v1.10.0** 上增加 Android KernelSU 模块移植（当前 `v1.13.1-ksu`，基于上游 v1.13.0）。构建与增量见 [EXPORT.md](EXPORT.md)。
 >
 > 溯源：linguo2625469/workbuddy2api-panel 本身是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的增强分支。本移植**不放宽**上游的授权使用边界：仅限本人授权账号、本机 / 私有环境测试。
 
@@ -18,6 +18,8 @@
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
   <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Single_Binary%20%7C%20Docker-2496ED?style=flat-square">
   <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
+  <img alt="KSU" src="https://img.shields.io/badge/KernelSU-v1.13.1--ksu-3DDC84?style=flat-square">
+  <img alt="Protocols" src="https://img.shields.io/badge/Protocols-OpenAI%20%7C%20Responses%20%7C%20Anthropic-8A2BE2?style=flat-square">
 </p>
 
 ---
