@@ -841,6 +841,14 @@ func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
 }
 
 func TestModelsEndpoint(t *testing.T) {
+	// 测试隔离：模型目录是包级缓存，前序用例（TestModelsDynamicFallsBackToStatic 等）
+	// 留下的负缓存会让本用例在 -count>1 时拿到空/残缺名单。这里显式清一次。
+	dynamicModelsCache.Lock()
+	dynamicModelsCache.ids = nil
+	dynamicModelsCache.fetched = time.Time{}
+	dynamicModelsCache.lastFail = time.Time{}
+	dynamicModelsCache.Unlock()
+
 	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New()})
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
