@@ -725,6 +725,11 @@ function mdRowHtml(m, pr) {
   if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
   if (m.supports_images) caps.push('<span class="tag warn">视觉</span>');
   if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag warn">思考常开</span>');
+  // 上游实时繁忙度（/v2/chat/busy 只读观测）：只在 busy / congested / unavailable
+  // 挂色标——idle / normal 是常态（挂上去等于满屏噪音），unknown 是「当次没查到」
+  // 而非不可用。它解释的是偶发 429 / 6021 queue.full，不参与选号。
+  const busyLabel = { busy: '繁忙', congested: '拥堵', unavailable: '不可用' };
+  if (busyLabel[m.busy_level]) caps.push('<span class="tag bad">' + busyLabel[m.busy_level] + '</span>');
   const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
   const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
   return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +

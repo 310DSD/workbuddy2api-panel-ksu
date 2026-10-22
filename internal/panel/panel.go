@@ -371,7 +371,56 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "没有可用账号：请先在面板添加账号再查询")
 		return
 	}
+	// 补上游实时繁忙度（只读观测，拿不到就不填，不影响本端点成败）。
+	p.attachModelBusy(out)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
+}
+
+// attachModelBusy 给模型条目补 busy_level（上游 /v2/chat/busy 实时繁忙度）。
+//
+// 只读观测：无可用账号 / 请求失败 / 该模型未被上游返回 → 一律不填字段。
+// 繁忙度解释的是「为什么偶发 429 / 6021 queue.full」，不是模型可用性的判据，
+// 所以任何失败都不能把 models 端点拖成 5xx（面板宁可少一列，也不能整页打不开）。
+// 按 realm 分组各查一次：同名模型在两域容量不同，用错账号查出来的数会误导。
+func (p *Panel) attachModelBusy(entries []map[string]any) {
+	byRealm := map[string][]string{}
+	for _, e := range entries {
+		id, _ := e["id"].(string)
+		realm, model, ok := strings.Cut(id, ":")
+		if !ok || model == "" {
+			continue
+		}
+		byRealm[realm] = append(byRealm[realm], model)
+	}
+	if len(byRealm) == 0 {
+		return
+	}
+	levels := make(map[string]map[string]string, len(byRealm))
+	for realm, models := range byRealm {
+		uids := p.cfg.Pool.AvailableUIDsForRealm(realm)
+		if len(uids) == 0 {
+			continue
+		}
+		acct := p.cfg.Pool.AuthByUID(uids[0])
+		if acct == nil {
+			continue
+		}
+		m, err := p.cfg.Upstream.ModelBusy(acct, models)
+		if err != nil || len(m) == 0 {
+			continue // 观测失败：不填（unknown ≠ unavailable）
+		}
+		levels[realm] = m
+	}
+	for _, e := range entries {
+		id, _ := e["id"].(string)
+		realm, model, ok := strings.Cut(id, ":")
+		if !ok {
+			continue
+		}
+		if lv := levels[realm][model]; lv != "" {
+			e["busy_level"] = lv
+		}
+	}
 }
 
 // panelModelEntry 构造单个模型条目（两域共用）：id 带 realm 前缀（调用值即显示值），
