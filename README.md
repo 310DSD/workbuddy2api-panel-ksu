@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.27.2-00ADD8?logo=go&logoColor=white&style=flat-square">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.27.3-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
   <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Single_Binary%20%7C%20Docker-2496ED?style=flat-square">
   <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
@@ -257,7 +257,7 @@ flowchart LR
 - **Docker + Docker Compose**（服务端部署方式，镜像内已含低权限用户与全部工具脚本）——或
 - **Windows / macOS / Linux 直接跑单文件二进制**（无需 Docker，见下方「Windows 单文件运行」）
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
-- 宿主机 Go ≥ 1.27.2（仅从源码构建时需要；`go.mod` 要求 `go 1.27.2`）
+- 宿主机 Go ≥ 1.27.3（仅从源码构建时需要；`go.mod` 要求 `go 1.27.3`）
 
 ### 方式一：Docker Compose（推荐服务器部署）
 
@@ -810,7 +810,7 @@ claude
 
 ### Docker 镜像
 
-多阶段镜像（`golang:1.27.2-alpine` 构建，与 `go.mod` 声明的 `go 1.27.2` 一致 → `alpine:3.20` 运行）一次编译全部四个二进制并随镜像分发：
+多阶段镜像（`golang:1.27.3-alpine` 构建，与 `go.mod` 声明的 `go 1.27.3` 一致 → `alpine:3.20` 运行）一次编译全部四个二进制并随镜像分发：
 
 - **wb2api**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `scripts/probe_active.py`）
 - 以 `app` 用户（uid 10001）运行，`app/auths` 与 `app/data` 预建

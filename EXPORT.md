@@ -8,7 +8,7 @@
 
 - 根目录：Go 网关源码（`cmd/` `internal/` `go.mod` 等）
 - `kernelsu/`：KernelSU 模块工程（不含预编译二进制）
-- 版本：`1.13.0-ksu`，Go 1.27.2 交叉编译目标 android/arm64
+- 版本：`1.13.0-ksu`，Go 1.27.3 交叉编译目标 android/arm64
 
 ## 本 fork 相对上游的增量
 
