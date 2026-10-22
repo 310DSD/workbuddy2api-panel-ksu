@@ -709,11 +709,30 @@ http://127.0.0.1:7863/panel/
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
+| `POST /v1/responses` | Bearer（`api_key` 非空时） | **OpenAI Responses 协议**（Codex 直连）：`input` 支持字符串或 items 数组（message / function_call / function_call_output）、`instructions`、`reasoning.effort`、`tools`（function 与 custom）、`text.format`；流式输出 `response.created` / `output_item.*` / `output_text.*` / `reasoning_summary_*` / `function_call_arguments.*` / `completed｜incomplete｜failed`（每事件带 `sequence_number`），非流式输出 `response` 对象。**不支持** `previous_response_id`/`store`（Codex 每轮带全量 input）；`GET /v1/responses`（WS 升级探测）回 426，客户端据此立刻回落 HTTPS |
+| `POST /v1/messages`（别名 `POST /messages`） | Bearer **或** `x-api-key`（`api_key` 非空时） | **Anthropic Messages 协议**（Claude Code 直连）：`system`/`messages` 的 text·image·tool_use·tool_result 块、`tools[].input_schema`、`tool_choice` 四态、`thinking.budget_tokens`→思考档、`stop_sequences`；流式输出 `message_start` / `content_block_start｜delta｜stop` / `message_delta` / `message_stop`（工具参数走 `input_json_delta`）；非流式输出 Anthropic `message`（`stop_reason` 映射 end_turn / max_tokens / tool_use）。上游 reasoning 无 signature，作为 `thinking` 块展示；客户端回传的 thinking 块被丢弃（不触发签名校验） |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
 
-> 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
+> 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。`/v1/messages` 额外接受 Anthropic 的 `x-api-key` 头。
+
+### 接入 Codex / Claude Code
+
+三个推理入口共用同一条管道（选号、轮转、冷却/熔断、提示词改写、指纹脱敏、DSML 还原、零输出守卫、11102 模型下架提升全都在），所以三个协议的能力与限制完全一致。
+
+```bash
+# Codex（Responses 协议）
+#   config.toml：base_url = "http://<网关>:7863/v1"，wire_api = "responses"，env_key = "WB2API_KEY"
+WB2API_KEY=<api_key> codex
+
+# Claude Code（Anthropic Messages 协议）
+export ANTHROPIC_BASE_URL=http://<网关>:7863
+export ANTHROPIC_API_KEY=<api_key>   # 走 x-api-key 头，网关同时接受 Bearer
+claude
+```
+
+协议适配层的边界（明确说明，而不是静默出错）：**不做服务端会话状态**（`previous_response_id` / `store` / 多轮服务端缓存都不支持，客户端每轮带全量上下文即可）；**托管联网/文件检索工具不执行**（`{"type":"web_search"}` 之类的工具声明会被丢弃，避免模型以为能联网却拿不到结果）；`custom` 工具（如 `apply_patch`）折叠成「单参 `input`」的 function 下发，回程按 `function_call` 上报；上游 `reasoning_content` 无签名，只作为展示用的 thinking 块下发。
 
 `/healthz` 响应示例（200 / 503 同结构，仅状态码与计数变化）：
 

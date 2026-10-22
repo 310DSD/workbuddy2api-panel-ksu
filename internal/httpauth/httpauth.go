@@ -36,6 +36,29 @@ func VerifyBearer(r *http.Request, key string) bool {
 	return subtle.ConstantTimeCompare(digest(tok), digest(key)) == 1
 }
 
+// VerifyAPIKey 校验请求头是否携带正确的密钥，接受两种形态：
+//
+//	Authorization: Bearer <key>   （OpenAI 口径，也是本网关既有口径）
+//	x-api-key: <key>              （Anthropic 口径，Claude Code 用这个）
+//
+// key 为空表示"未启用鉴权"，恒返回 true（与 VerifyBearer 同语义）。
+// 两种形态都走 SHA-256 摘要 + 常量时间比较，且**两条都算一遍**再取或：
+// 早退会让「只带 x-api-key」的请求比「带错 Bearer」的请求更快返回，泄露头形态。
+func VerifyAPIKey(r *http.Request, key string) bool {
+	if key == "" {
+		return true
+	}
+	authz := r.Header.Get("Authorization")
+	authzOK := false
+	if strings.HasPrefix(authz, bearerPrefix) {
+		authzOK = subtle.ConstantTimeCompare(digest(authz[len(bearerPrefix):]), digest(key)) == 1
+	} else {
+		_ = subtle.ConstantTimeCompare(digest(""), digest(key))
+	}
+	apiKeyOK := subtle.ConstantTimeCompare(digest(r.Header.Get("x-api-key")), digest(key)) == 1
+	return authzOK || apiKeyOK
+}
+
 // digest 返回 s 的 SHA-256（定长 32 字节，供常量时间比较）。
 func digest(s string) []byte {
 	sum := sha256.Sum256([]byte(s))

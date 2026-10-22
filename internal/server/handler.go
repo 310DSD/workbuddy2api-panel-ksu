@@ -136,6 +136,13 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// Responses 协议（Codex）：转成 chat 请求复用同一条管道，出站再翻回 Responses 事件流。
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
+	h.mux.HandleFunc("GET /v1/responses", h.responsesWebsocketUnsupported)
+	// Anthropic Messages 协议（Claude Code）：/v1/messages 与 /messages 双路径都挂。
+	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.messages))
+	h.mux.HandleFunc("POST /messages", h.withAnthropicAuth(h.messages))
+	h.mux.HandleFunc("GET /v1/messages", h.messagesWebsocketUnsupported)
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
@@ -146,7 +153,9 @@ func NewHandler(cfg Config) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions" {
+	// 请求级观测（流水行 + 归档）覆盖所有推理入口：chat.completions / responses / messages。
+	// 三个入口最终都走 chatCompletions，trace 经 context 传下去，不会重复记两条。
+	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && isInferencePath(r.URL.Path) {
 		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now()}
 		if h.loadLive().RecordClientInfo {
 			trace.captureClientInfo(r)
@@ -166,6 +175,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mux.ServeHTTP(w, r)
+}
+
+// isInferencePath 报告该路径是否为推理入口（需要请求级观测包装）。
+func isInferencePath(path string) bool {
+	switch path {
+	case "/v1/chat/completions", "/v1/responses", "/v1/messages":
+		return true
+	}
+	return false
+}
+
+// withAnthropicAuth Anthropic 协议入口鉴权：除 Bearer 外还接受 x-api-key
+// （Claude Code 发的是后者），与 /v1/* 的 api_key 同口径、常量时间比较。
+// 失败响应按 Anthropic 错误信封返回，客户端才能正确解析。
+func (h *Handler) withAnthropicAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !httpauth.VerifyAPIKey(r, h.loadLive().APIKey) {
+			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "missing or invalid API key")
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
