@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,6 +20,10 @@ var (
 	dnsMu       sync.Mutex
 	dnsCached   []string
 	dnsCachedAt time.Time
+	// dnsRR 轮转起点：同一个「首选 DNS 不可达」的账号不该每次都撞同一台服务器。
+	// Go 的解析器在查询超时后会再次调用 Dial，这里每次从下一台开始，最坏情况
+	// （首选服务器黑洞）也能在第二次尝试换到下一台，而不是永远卡在第一台。
+	dnsRR atomic.Uint64
 )
 
 func init() {
@@ -33,9 +38,29 @@ func installAndroidResolver() {
 	net.DefaultResolver = &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{Timeout: 3 * time.Second}
+			d := net.Dialer{Timeout: 2 * time.Second}
+			// 解析器给的 address 若是**真正可用**的 DNS（非环回），优先按它的顺序拨：
+			// 多 DNS 配置时由 Go 自己决定何时换服务器。Android 上是 [::1]:53，
+			// 走不了，落到下面的 getprop + 公共兜底列表。
+			if host, _, err := net.SplitHostPort(address); err == nil {
+				if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+					if c, derr := d.DialContext(ctx, network, address); derr == nil {
+						return c, nil
+					}
+				}
+			}
+			servers := loadDNSServers()
+			if len(servers) == 0 {
+				return nil, &net.OpError{Op: "dial", Net: network, Err: os.ErrNotExist}
+			}
+			// 轮转起点：每次 Dial 往后挪一格。UDP 拨号几乎总是立即成功（无握手），
+			// 服务器「不可达」只能在查询超时里暴露；轮转保证连续两次尝试不会
+			// 都压在同一个黑洞 DNS 上（手机切网后 net.dns1 常常是旧网络的地址）。
+			start := int(dnsRR.Add(1)) % len(servers)
 			var last error
-			for _, srv := range loadDNSServers() {
+			for i := 0; i < len(servers); i++ {
+				srv := servers[(start+i)%len(servers)]
+				// 先 UDP；连接失败再试 TCP（少数网络封 UDP 53）。
 				for _, nw := range []string{"udp", "tcp"} {
 					c, err := d.DialContext(ctx, nw, srv)
 					if err == nil {

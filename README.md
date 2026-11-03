@@ -1,4 +1,4 @@
-> **本仓库是 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的 GitHub Fork**（官方 fork 关系），并在上游 **v1.10.0** 上增加 Android KernelSU 模块移植（当前 `v1.13.1-ksu`，基于上游 v1.13.0）。构建与增量见 [EXPORT.md](EXPORT.md)。
+> **本仓库是 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的 GitHub Fork**（官方 fork 关系），并在上游 **v1.10.0** 上增加 Android KernelSU 模块移植（当前 `v1.13.2-ksu`，基于上游 v1.13.0）。构建与增量见 [EXPORT.md](EXPORT.md)。
 >
 > 溯源：linguo2625469/workbuddy2api-panel 本身是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的增强分支。本移植**不放宽**上游的授权使用边界：仅限本人授权账号、本机 / 私有环境测试。
 
@@ -18,7 +18,7 @@
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
   <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Single_Binary%20%7C%20Docker-2496ED?style=flat-square">
   <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
-  <img alt="KSU" src="https://img.shields.io/badge/KernelSU-v1.13.1--ksu-3DDC84?style=flat-square">
+  <img alt="KSU" src="https://img.shields.io/badge/KernelSU-v1.13.2--ksu-3DDC84?style=flat-square">
   <img alt="Protocols" src="https://img.shields.io/badge/Protocols-OpenAI%20%7C%20Responses%20%7C%20Anthropic-8A2BE2?style=flat-square">
 </p>
 
@@ -509,10 +509,13 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 | 客户端错误 | 其余 4xx / 业务 `code≠0` | 不处罚，换号重试 | 即时 |
 | **零输出**（`zero_output_length`） | HTTP 200 + 收尾帧（任意 `finish_reason`，`content_filter` 除外），但正文 / 思考 / 工具调用**全空** | **不罚账号**，换号重发一次（网关零字节写出，客户端无痕）；全池都撞则回 `502 zero_output_length` + 可行动 hint | 即时 |
 | **整体不可用模型**（`model_unavailable`） | 同一域 **≥2 个不同账号**被上游明确回 `11102`（该后端无此模型） | **不打上游直接拒绝**（400），并把该模型从 `/v1/models` 摘除；每 30 分钟放行一个探针请求验证恢复 | 任一账号实测成功即自动解除 |
+| **上游超时**（`upstream_timeout`） | 分四类：`dial`/`tls`（连接建立）、`header`（等响应头）、`idle`（流中停滞） | 不罚账号；`dial`/`tls` 自动**清空连接池 + 换新连接重试一次**（请求未到上游，不重复计费）；全失败回 503 + `Retry-After: 5` + 分类 hint | 即时 |
 
 请求体解析失败（`11101`）与内容拦截一样**不罚账号**：问题在请求内容而非账号健康。网关不做请求体截断与预拦截，`11101` 均为客户端发来的畸形 JSON。
 
 **零输出守卫**（`upstream.WithZeroOutputGuard`）：上游「收下请求却零输出」此前被当成一次成功——客户端拿到空正文，网关零日志零计数，下一次照旧挑同一个号撞同一面墙。判据对流式与非流式统一（全空即零输出，`content_filter` 除外），不再出现「stream:true 换号重发、stream:false 回 200 空壳」的不一致。典型成因是输入越过模型**真实**上下文窗口（声明的 `context_length` 被虚报），或 `max_tokens` 被思考吃光。现在流式路径在**写出第一个可见字节之前**判定（role 帧 / 空 delta 帧 / usage-only 帧都先攒在内存里，响应头也不提交），命中即换号重发；非流式在聚合体上同判据。它是**请求形态问题**而非账号健康问题，所以既不冷却也不喂连败计数；全池都撞时返回 `502 zero_output_length` 并提示缩短输入 / 调大 `max_tokens` / 换模型——不会伪装成 `no_healthy_account`（那会让客户端无脑重试）。
+
+**上游超时分类与重试**（`upstream/timeout.go` + `server/timeout.go`）：手机端（KernelSU）最常见的是 `dial` 超时——切网/休眠唤醒/旧 DNS 黑洞让 TCP 建连卡住（旧 `dialTimeout=10s`，恰好在上次输出后约 10 秒报错）。现在：拨号超时 **10s→25s**、TLS 握手 **10s→20s**；`dial`/`tls` 超时后清空空闲连接池并**换新连接重试一次**（请求未到达上游，不会重复计费）；Android 的 DNS 解析从「首选服务器」改为**轮转兜底**（切网后旧 `net.dns1` 黑洞不至于每次都撞同一台）。`header` 超时不重试（请求可能已到上游，重试有重复生成风险），`idle` 如实中断。分类计数与最近一次详情见 `GET /status` 的 `upstream_timeouts`（`dial`/`tls`/`header`/`idle`/`other` + `connect_retries`）；末端 hint 按类给出网络/调参建议，不再误报「没有可用账号」。
 
 **整体不可用模型提升**（`pool/modelunavail.go`）：`11102` 原本只是**逐账号**负缓存——模型整体下架时每个号都要白撞一次上游，期间 `/v1/models` 照旧列出它。现在同一域 **≥2 个不同账号**被上游明确回 `11102` 即判「模型整体不可用」：请求在**打上游之前**就回 `400 model_unavailable`（换号重试必然同样失败，该做的是换模型），`/v1/models` 摘除该模型，面板「模型锁池」以 `不可用状态`单列。判据只认上游阳性证据（绝不从「远端目录里没有」反推）；`11158`「号型不允许」属账号权限差异，**不参与**提升。判定完全派生自各账号持久化的 `11102` 台账，所以任一账号实测成功（`BlockModelClear`）即自动恢复，无需人工复位；另每 30 分钟放行一个探针请求，防止「上游悄悄恢复却永远学不到」。
 

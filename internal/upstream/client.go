@@ -617,6 +617,9 @@ type Client struct {
 	// IdleTimeout 聊天 SSE 流中空闲超时；<=0 表示禁用空闲监控。
 	IdleTimeout time.Duration
 
+	// transportRetries 连接层超时（dial/TLS）重试次数，进程内累计（/status 观测）。
+	transportRetries atomic.Int64
+
 	// effortsMu/efforts 缓存各模型 supportedEfforts（FetchModels 刷新），供请求体 effort 降级。
 	// 按 realm 分层桶（cn/global）：同模型名跨域探测的 effort 集合可能不同，
 	// 混桶会互相污染（C-2）。
@@ -988,6 +991,10 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	return nil
 }
 
+// TransportRetries 返回连接层超时（dial/TLS）后「换新连接重试」的累计次数
+// （进程内，/status.upstream_timeouts.connect_retries 观测用）。
+func (c *Client) TransportRetries() int64 { return c.transportRetries.Load() }
+
 // ChatStream 发 chat 请求并返回原始 SSE body 流（调用方负责 Close）。
 // 等价于 ChatStreamContext(context.Background(), ...)：不带调用方取消语义。
 // 需要客户端断开联动的调用方用 ChatStreamContext 传入请求 ctx。
@@ -997,6 +1004,10 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 func (c *Client) ChatStream(a *auth.Auth, body []byte, clientIP string, meta ChatMeta) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	return c.ChatStreamContext(context.Background(), a, body, clientIP, meta)
 }
+
+// connectRetryBackoff 连接层超时（dial/TLS）后的重试间隔：清空空闲池后再等一小段，
+// 让手机射频/路由从切网抖动里恢复；固定值即可（重试只有一次，不需要抖动分布）。
+const connectRetryBackoff = 300 * time.Millisecond
 
 // ChatStreamContext 同 ChatStream，但从 ctx 派生请求 context：调用方（handler）传入
 // r.Context() 后，客户端断连/请求取消会立即中断在途上游调用、释放连接与账号在途名额，
@@ -1033,18 +1044,45 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	}
 	path := paths[0]
 	endpoint := c.chatBase(a) + path
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(prepared))
+	// newAttempt 构造一次独立尝试（请求体可重放：prepared 是内存字节）。
+	// 每次尝试都要新的 context（首个 attempt 失败时已 cancel），cancel 的所有权：
+	// 失败分支显式调用，成功分支交给 monitorBody。
+	newAttempt := func() (*http.Request, context.CancelFunc, error) {
+		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(prepared))
+		if err != nil {
+			return nil, nil, err
+		}
+		c.ChatHeaders(req, a, clientIP, meta)
+		reqCtx, cancel := context.WithCancel(ctx)
+		return req.WithContext(reqCtx), cancel, nil
+	}
+	req, cancel, err := newAttempt()
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	c.ChatHeaders(req, a, clientIP, meta)
-	// 从调用方 ctx 派生：保留取消传播（父 ctx 取消 → 本 ctx 取消），
-	// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
-	reqCtx, cancel := context.WithCancel(ctx)
-	req = req.WithContext(reqCtx)
 	resp, err := c.chatHTTP().Do(req)
-	if err != nil {
+	if err != nil && ctx.Err() == nil && ClassifyTimeout(err).IsConnectTimeout() {
+		// 连接建立阶段超时（dial/TLS）：请求**没有到达上游**，重试安全（不重复计费）。
+		// 移动端最常见的 503 来源：切网/休眠后旧空闲连接半死，Go 自行重拨又撞上
+		// 弱网 DNS/握手超时。这里清空空闲池 + 换一条全新连接再试一次。
 		cancel()
+		c.transportRetries.Add(1)
+		roundTripCloseIdle(c.chatHTTP().Transport)
+		log.Printf("WARN: [upstream] chat_stream acct=%s: %s timeout, retry with fresh connection: %v",
+			logfmt.Label(a.UID, a.Nickname), ClassifyTimeout(err), err)
+		time.Sleep(connectRetryBackoff)
+		var rerr error
+		req, cancel, rerr = newAttempt()
+		if rerr == nil {
+			resp, err = c.chatHTTP().Do(req)
+		} else {
+			err = rerr
+		}
+	}
+	if err != nil {
+		if cancel != nil {
+			cancel()
+		}
 		log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
 		// 传输层失败 → 清空共享连接池的空闲连接（连接层加固）：失败连接可能仍
 		// 留在空闲池里，下一个请求会继续捡到它——仅靠 IdleConnTimeout 等过期

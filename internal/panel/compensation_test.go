@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -34,7 +35,10 @@ func compPanel(t *testing.T) (*Panel, *int64) {
 			case strings.Contains(token, "at-2"):
 				_, _ = w.Write([]byte(`{"code":0,"data":{"active":true,"claimed":true,"credit_num":500}}`))
 			default:
-				_, _ = w.Write([]byte(`{"code":0,"data":{"active":true,"claimed":false,"credit_num":500,"end_time":"2026-10-22 23:59:59"}}`))
+				// 截止时间必须相对 now 生成：写死日期会在到期后让用例变成时间炸弹
+				//（seconds_left=0 / expired=true，2026-11-03 实际踩到）。
+				end := time.Now().Add(48 * time.Hour).Format("2006-01-02 15:04:05")
+				_, _ = w.Write([]byte(`{"code":0,"data":{"active":true,"claimed":false,"credit_num":500,"end_time":"` + end + `"}}`))
 			}
 		case strings.HasSuffix(r.URL.Path, "/billing/meter/claim-compensation"):
 			atomic.AddInt64(&claimCalls, 1)
@@ -97,8 +101,8 @@ func TestCompensationListEndpoint(t *testing.T) {
 			if m["pending"] != true || m["credit_num"].(float64) != 500 {
 				t.Errorf("u1=%v want pending/500", m)
 			}
-			if m["end_time"] != "2026-10-22 23:59:59" {
-				t.Errorf("u1 end_time=%v", m["end_time"])
+			if end, _ := m["end_time"].(string); end == "" {
+				t.Errorf("u1 end_time 缺失：%v", m["end_time"])
 			}
 			if v, ok := m["seconds_left"].(float64); !ok || v <= 0 {
 				t.Errorf("u1 缺 seconds_left 或非正：%v", m["seconds_left"])

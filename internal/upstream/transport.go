@@ -14,10 +14,16 @@ import (
 
 // 连接层参数集中定义（与 server/backoff.go 同风格：一处定义，测试可回读断言）。
 const (
-	// dialTimeout TCP 连接建立上限。半死连接的第一道闸：连不上就快速失败
-	// 轮转换号，不再干等系统 TCP 重传窗口（kongjianguan 实测半开 TCP 单次
+	// dialTimeout TCP 连接建立上限（含 DNS 解析）。半死连接的第一道闸：连不上
+	// 就快速失败换号，不再干等系统 TCP 重传窗口（kongjianguan 实测半开 TCP 单次
 	// TTFB 卡 936s——默认 Dialer 无超时上限）。
-	dialTimeout = 10 * time.Second
+	//
+	// 10s → 25s（v1.13.2，移动端实测）：手机切网 / 休眠唤醒 / NAT 半死连接时，
+	// DNS（Android 走 getprop 的首个 DNS 常不可达）+ TCP 建连经常超过 10s；旧值
+	// 让请求在上次输出后约 10s 报 upstream_timeout，且被误当成「上游慢」停轮转。
+	// 25s 覆盖一次移动网络切换的典型恢复时间；失败后还有连接层重试一次（见
+	// client.go 的 connectRetryBackoff）。
+	dialTimeout = 25 * time.Second
 	// dialKeepAlive TCP keepalive 探测周期。默认 Dialer 2h 才发首个探测——
 	// NAT 黑洞里 2h 足够连接半死且被复用。15s 周期让死连接在 15~30s 内被
 	// 内核掐掉（RST/ETIMEDOUT），复用侧立即感知而非卡到重传窗口。
@@ -25,7 +31,8 @@ const (
 	// tlsHandshakeTimeout TLS 握手上限。现役此前完全缺失——握手挂起时无任何
 	// 层兜底（ResponseHeaderTimeout 只在请求写完后才计时），只能干等到
 	// HTTP.Client.Timeout(120s)。
-	tlsHandshakeTimeout = 10 * time.Second
+	// 10s → 20s（同上：移动网络 RTT 高、TLS 往返多，10s 在弱网下过紧）。
+	tlsHandshakeTimeout = 20 * time.Second
 	// idleConnTimeout 空闲连接池保留时长。从 90s 收到 30s：WAF 风暴后上游
 	// NGI 常态性掐闲置连接，90s 池里的连接多半已死（kongjianguan 同款取值）；
 	// 复用侧仍有 15s keepalive 兜底识别。

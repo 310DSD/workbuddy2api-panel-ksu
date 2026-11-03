@@ -118,6 +118,9 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
+	// timeouts 出站超时分类计数（进程内，/status 观测）：手机端 503 排障时
+	// 一眼分清「连不上（dial/tls）」与「上游不回包（header）/流停滞（idle）」。
+	timeouts timeoutStats
 }
 
 // NewHandler 构建 handler。
@@ -276,6 +279,10 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			"events_total": exploreEvents,
 			"per_model":    exploreLast,
 		},
+		// upstream_timeouts 出站超时分类计数（进程内）：手机端 503 排障用。
+		// counts 按 dial/tls/header/idle/other 分桶；last 是最近一次的分类/耗时/原文；
+		// connect_retries 是 upstream 连接层超时后「换新连接重试」的次数。
+		"upstream_timeouts": h.timeouts.snapshot(h.cfg.Upstream),
 	})
 }
 
@@ -902,11 +909,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// **客户端仍在但 ctx 被取消**——那只能是我们自己的空闲看门狗掐的流，
 			// 也就是上游停滞。客户端主动断连时 r.Context() 已取消，走下面的抖动分支。
 			if isUpstreamTimeout(terr, r.Context().Err() != nil) {
+				kind := upstream.ClassifyTimeout(terr)
+				elapsed := time.Since(attemptStarted)
+				h.timeouts.note(kind, elapsed, terr)
 				recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 				st.status = http.StatusServiceUnavailable
 				lastErr = fmt.Errorf("%w: %v", errUpstreamTimeout, terr)
-				log.Printf("WARN: [server] upstream timeout acct=%s: %v (rotation stopped, account not penalized)",
-					logfmt.Label(acct.UID, acct.Nickname), terr)
+				// 连接层超时（dial/TLS）已在 upstream 内部换新连接重试过一次；
+				// 走到这里说明重试也失败——是网络路径问题，不是账号问题。
+				log.Printf("WARN: [server] upstream timeout acct=%s kind=%s elapsed=%s: %v (account not penalized)",
+					logfmt.Label(acct.UID, acct.Nickname), kind, elapsed.Round(time.Millisecond), terr)
 				break
 			}
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
@@ -1253,11 +1265,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 的文案，别混进"没有可用账号"——两者的排查方向完全不同。
 	if errors.Is(lastErr, errUpstreamTimeout) {
 		code = "upstream_timeout"
-		msg = "upstream timed out: rotation stopped (another account would hit the same slow upstream), please retry later"
+		// 5s 后重试：给客户端/Agent 一个明确的退避信号（503 + Retry-After 是
+		// 标准可重试语义；比让 Agent 立刻重打、把弱网再压一遍更友好）。
+		w.Header().Set("Retry-After", "5")
+		kind, elapsed := h.timeouts.last()
+		msg = upstreamTimeoutMessage(kind, elapsed)
 	}
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 	// 错误（无上游原文）固定 no_healthy_account hint。
 	hint := upstream.NoHealthyAccountHint()
+	// 超时用**超时专属** hint：手机端 503 最常见的是连接层超时，套用
+	// 「no healthy account / 检查账号池」会把排障方向带偏（实测反馈）。
+	if errors.Is(lastErr, errUpstreamTimeout) {
+		kind, _ := h.timeouts.last()
+		hint = upstreamTimeoutHint(kind)
+	}
 	// upstreamMsgPassed 记录 error.message 是否已被上游原文占据：模型级阻塞分支
 	// 据此决定要不要覆盖 msg（上游原文优先，含 requestId）。
 	upstreamMsgPassed := false
